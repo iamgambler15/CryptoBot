@@ -1,61 +1,41 @@
 require('dotenv').config();
 const axios = require('axios');
 
-// ─── LTC REAL TRANSACTION via NOWNodes ───────────────────────────────────────
+// ─── LTC REAL TRANSACTION via BlockCypher (Free Forever) ─────────────────────
 async function sendLTC(fromAddress, fromPrivateKeyWIF, toAddress, amountLTC) {
   try {
     const bitcore = require('bitcore-lib');
-
-    const NOWNODES_KEY = process.env.NOWNODES_KEY;
-    const BASE = `https://ltc.nownodes.io/${NOWNODES_KEY}`;
+    const TOKEN = process.env.BLOCKCYPHER_TOKEN;
+    const BASE = `https://api.blockcypher.com/v1/ltc/main`;
 
     const FEE_SATOSHIS = 10000; // 0.0001 LTC
     const amountSatoshis = Math.round(amountLTC * 1e8);
 
     // ── Step 1: Get UTXOs ──────────────────────────────────────────────────
-    const utxoRes = await axios.post(BASE, {
-      jsonrpc: '2.0', id: 1,
-      method: 'listunspent',
-      params: [1, 9999999, [fromAddress]],
-    }, { timeout: 15000 });
+    const utxoRes = await axios.get(
+      `${BASE}/addrs/${fromAddress}?unspentOnly=true&includeScript=true&token=${TOKEN}`,
+      { timeout: 15000 }
+    );
 
-    const utxos = utxoRes.data.result || [];
+    const utxos = utxoRes.data.txrefs || [];
+    if (utxos.length === 0) throw new Error('No unspent outputs. Please deposit LTC first.');
 
-    // If no UTXOs from listunspent, try scantxoutset
-    if (utxos.length === 0) {
-      const scanRes = await axios.post(BASE, {
-        jsonrpc: '2.0', id: 2,
-        method: 'scantxoutset',
-        params: ['start', [`addr(${fromAddress})`]],
-      }, { timeout: 20000 });
-
-      const unspents = scanRes.data.result?.unspents || [];
-      if (unspents.length === 0) throw new Error('No unspent outputs found for this address');
-
-      unspents.forEach(u => utxos.push({
-        txid: u.txid,
-        vout: u.vout,
-        scriptPubKey: u.scriptPubKey,
-        amount: u.amount,
-      }));
-    }
-
-    // ── Step 2: Calculate totals ───────────────────────────────────────────
-    const totalAvailable = utxos.reduce((sum, u) => sum + Math.round(u.amount * 1e8), 0);
+    // ── Step 2: Check Balance ──────────────────────────────────────────────
+    const totalAvailable = utxos.reduce((sum, u) => sum + u.value, 0);
     const totalNeeded = amountSatoshis + FEE_SATOSHIS;
     if (totalAvailable < totalNeeded) {
-      throw new Error(`Insufficient on-chain funds. Available: ${totalAvailable / 1e8} LTC, Needed: ${totalNeeded / 1e8} LTC`);
+      throw new Error(`Insufficient on-chain funds.\nAvailable: ${(totalAvailable/1e8).toFixed(8)} LTC\nNeeded: ${(totalNeeded/1e8).toFixed(8)} LTC`);
     }
 
     // ── Step 3: Build & Sign Transaction ──────────────────────────────────
     const privateKey = new bitcore.PrivateKey(fromPrivateKeyWIF);
 
     const utxoObjects = utxos.map(u => new bitcore.Transaction.UnspentOutput({
-      txId: u.txid,
-      outputIndex: u.vout,
+      txId: u.tx_hash,
+      outputIndex: u.tx_output_n,
       address: fromAddress,
-      script: u.scriptPubKey,
-      satoshis: Math.round(u.amount * 1e8),
+      script: u.script,
+      satoshis: u.value,
     }));
 
     const tx = new bitcore.Transaction()
@@ -67,18 +47,16 @@ async function sendLTC(fromAddress, fromPrivateKeyWIF, toAddress, amountLTC) {
 
     const rawTx = tx.serialize();
 
-    // ── Step 4: Broadcast ─────────────────────────────────────────────────
-    const broadcastRes = await axios.post(BASE, {
-      jsonrpc: '2.0', id: 3,
-      method: 'sendrawtransaction',
-      params: [rawTx],
-    }, { timeout: 15000 });
+    // ── Step 4: Broadcast via BlockCypher ─────────────────────────────────
+    const broadcastRes = await axios.post(
+      `${BASE}/txs/push?token=${TOKEN}`,
+      { tx: rawTx },
+      { timeout: 15000 }
+    );
 
-    if (broadcastRes.data.error) {
-      throw new Error(broadcastRes.data.error.message);
-    }
+    if (broadcastRes.data.error) throw new Error(broadcastRes.data.error);
 
-    return broadcastRes.data.result; // txHash
+    return broadcastRes.data.tx.hash;
 
   } catch (err) {
     console.error('LTC send error:', err.message);
@@ -86,7 +64,7 @@ async function sendLTC(fromAddress, fromPrivateKeyWIF, toAddress, amountLTC) {
   }
 }
 
-// ─── TRX REAL TRANSACTION via TronWeb ────────────────────────────────────────
+// ─── TRX REAL TRANSACTION via TronWeb (Free Forever) ─────────────────────────
 async function sendTRX(fromAddress, fromPrivateKey, toAddress, amountTRX) {
   try {
     const TronWeb = require('tronweb');
@@ -97,19 +75,17 @@ async function sendTRX(fromAddress, fromPrivateKey, toAddress, amountTRX) {
       privateKey: fromPrivateKey,
     });
 
-    // Validate address
+    // Validate TRX address
     if (!tronWeb.isAddress(toAddress)) {
-      throw new Error('Invalid TRX address');
+      throw new Error('Invalid TRX address format');
     }
 
-    const amountSun = Math.round(amountTRX * 1e6); // TRX to SUN
+    const amountSun = Math.round(amountTRX * 1e6);
 
     // ── Send Transaction ───────────────────────────────────────────────────
     const tx = await tronWeb.trx.sendTransaction(toAddress, amountSun, fromPrivateKey);
 
-    if (!tx.result) {
-      throw new Error(tx.message || 'TRX transaction failed');
-    }
+    if (!tx.result) throw new Error(tx.message || 'TRX transaction failed');
 
     return tx.txid;
 
