@@ -8,7 +8,7 @@ const axios = require('axios');
 const crypto = require('crypto');
 const db = require('./database');
 const config = require('./config');
-const { sendLTC, sendTRX } = require('./transactions');
+const { sendLTC, sendSOL } = require('./transactions');
  
 const client = new Client({
   intents: [
@@ -28,12 +28,12 @@ const COINS = {
     addrExplorer: 'https://blockchair.com/litecoin/address/',
     geckoId: 'litecoin', fee: 0.0001, minTip: 0.001, minWithdraw: 0.001,
   },
-  trx: {
-    name: 'TRON', symbol: 'TRX', emoji: '🔴', color: '#FF060A',
-    logo: 'https://cryptologos.cc/logos/tron-trx-logo.png',
-    explorer: 'https://tronscan.org/#/transaction/',
-    addrExplorer: 'https://tronscan.org/#/address/',
-    geckoId: 'tron', fee: 0, minTip: 1, minWithdraw: 1,
+  sol: {
+    name: 'Solana', symbol: 'SOL', emoji: '🟣', color: '#9945FF',
+    logo: 'https://cryptologos.cc/logos/solana-sol-logo.png',
+    explorer: 'https://solscan.io/tx/',
+    addrExplorer: 'https://solscan.io/account/',
+    geckoId: 'solana', fee: 0.000005, minTip: 0.001, minWithdraw: 0.001,
   },
 };
  
@@ -58,22 +58,15 @@ function generateLTCAddress() {
   }
 }
  
-function generateTRXAddress() {
+function generateSOLAddress() {
   try {
-    const bs58check = require('bs58check');
-    const secp256k1 = require('secp256k1');
-    const { keccak256 } = require('ethereum-cryptography/keccak');
-    const privateKeyBytes = crypto.randomBytes(32);
-    const privateKeyHex = privateKeyBytes.toString('hex');
-    const pubKey = secp256k1.publicKeyCreate(privateKeyBytes, false);
-    const pubKeySliced = pubKey.slice(1);
-    const hashed = keccak256(pubKeySliced);
-    const addressBytes = hashed.slice(12);
-    const tronPayload = Buffer.concat([Buffer.from([0x41]), addressBytes]);
-    const address = bs58check.encode(tronPayload);
-    return { address, privateKey: privateKeyHex };
+    const { Keypair } = require('@solana/web3.js');
+    const keypair = Keypair.generate();
+    const address = keypair.publicKey.toBase58();
+    const privateKey = Buffer.from(keypair.secretKey).toString('hex');
+    return { address, privateKey };
   } catch (err) {
-    console.error('TRX gen error:', err.message);
+    console.error('SOL gen error:', err.message);
     return null;
   }
 }
@@ -96,11 +89,13 @@ async function checkLTCBalance(address) {
   } catch { return 0; }
 }
  
-async function checkTRXBalance(address) {
+async function checkSOLBalance(address) {
   try {
-    const res = await axios.get(`https://api.trongrid.io/v1/accounts/${address}`, { timeout: 5000 });
-    const data = res.data.data?.[0];
-    return data ? data.balance / 1e6 : 0;
+    const { Connection, PublicKey, clusterApiUrl } = require('@solana/web3.js');
+    const connection = new Connection(clusterApiUrl('mainnet-beta'));
+    const pubKey = new PublicKey(address);
+    const balance = await connection.getBalance(pubKey);
+    return balance / 1e9; // lamports to SOL
   } catch { return 0; }
 }
  
@@ -142,16 +137,16 @@ function selectEmbed(action) {
     .setDescription('Choose which coin you want to use:')
     .addFields(
       { name: '🔘 Litecoin (LTC)', value: '`Fee: 0.0001 LTC • Reliable Network`', inline: true },
-      { name: '🔴 TRON (TRX)', value: '`Fee: ZERO ✅ • Ultra Fast`', inline: true },
+      { name: '🟣 Solana (SOL)', value: '`Fee: ~$0.00025 • Ultra Fast`', inline: true },
     )
-    .setFooter({ text: 'LTC & TRX Tip Bot ⚡' })
+    .setFooter({ text: 'LTC & SOL Tip Bot ⚡' })
     .setTimestamp();
 }
  
 function selectRow(action) {
   return new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId(`${action}__ltc`).setLabel('🔘 Litecoin (LTC)').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId(`${action}__trx`).setLabel('🔴 TRON (TRX)').setStyle(ButtonStyle.Danger),
+    new ButtonBuilder().setCustomId(`${action}__sol`).setLabel('🟣 Solana (SOL)').setStyle(ButtonStyle.Primary),
   );
 }
  
@@ -217,7 +212,7 @@ function balEmbed(user, ltcBal, ltcUsd, trxBal, trxUsd) {
     .setThumbnail(COINS.ltc.logo)
     .addFields(
       { name: '🔘 Litecoin (LTC)', value: `**${fmt(ltcBal, 'ltc')} LTC**\n≈ **$${ltcUsd} USD**`, inline: true },
-      { name: '🔴 TRON (TRX)', value: `**${fmt(trxBal, 'trx')} TRX**\n≈ **$${trxUsd} USD**`, inline: true },
+      { name: '🟣 Solana (SOL)', value: `**${fmt(trxBal, 'sol')} SOL**\n≈ **$${trxUsd} USD**`, inline: true },
     )
     .setFooter({ text: `${user.tag} • Tip Bot`, iconURL: user.displayAvatarURL() })
     .setTimestamp();
@@ -253,9 +248,9 @@ function helpEmbed() {
       { name: '💹 `$price`', value: 'Check live LTC or TRX price', inline: false },
       { name: '🪂 `$airdrop <amount> <seconds>`', value: 'Example: `$airdrop 1 30` — Drop coins to joiners!', inline: false },
       { name: '❓ `$help`', value: 'Show this help menu', inline: false },
-      { name: '💡 Network Fees', value: '🔘 LTC: `0.0001 LTC` | 🔴 TRX: `FREE ✅`', inline: false },
+      { name: '💡 Network Fees', value: '🔘 LTC: `0.0001 LTC` | 🟣 SOL: `~$0.00025`', inline: false },
     )
-    .setFooter({ text: 'LTC & TRX Tip Bot ⚡ • Fast & Low Fees' })
+    .setFooter({ text: 'LTC & SOL Tip Bot ⚡ • Fast & Low Fees' })
     .setTimestamp();
 }
  
@@ -305,9 +300,9 @@ client.on('messageCreate', async (message) => {
     const ud = await db.getUser(u.id);
     const [ltcUsd, trxUsd] = await Promise.all([
       toUSD(ud.ltcBalance || 0, 'litecoin'),
-      toUSD(ud.trxBalance || 0, 'tron'),
+      toUSD(ud.solBalance || 0, 'solana'),
     ]);
-    const embed = balEmbed(u, ud.ltcBalance || 0, ltcUsd, ud.trxBalance || 0, trxUsd);
+    const embed = balEmbed(u, ud.ltcBalance || 0, ltcUsd, ud.solBalance || 0, trxUsd);
     return message.reply({ embeds: [embed] });
   }
  
@@ -522,7 +517,7 @@ client.on('interactionCreate', async (interaction) => {
     let ud = await db.getUser(user.id);
     const addrKey = `${coin}Address`;
     if (!ud[addrKey]) {
-      const wallet = coin === 'ltc' ? generateLTCAddress() : generateTRXAddress();
+      const wallet = coin === 'ltc' ? generateLTCAddress() : generateSOLAddress();
       if (!wallet) return interaction.editReply('❌ Failed to generate wallet. Please try again.');
       await db.setAddress(user.id, coin, wallet.address, wallet.privateKey);
       ud = await db.getUser(user.id);
@@ -637,7 +632,7 @@ client.on('interactionCreate', async (interaction) => {
       if (coin === 'ltc') {
         txHash = await sendLTC(ud[addrKey], ud[privKey], toAddr, amount);
       } else {
-        txHash = await sendTRX(ud[addrKey], ud[privKey], toAddr, amount);
+        txHash = await sendSOL(ud[addrKey], ud[privKey], toAddr, amount);
       }
  
       const usdVal = await toUSD(amount, c.geckoId);
@@ -679,12 +674,12 @@ client.on('interactionCreate', async (interaction) => {
 setInterval(async () => {
   const all = await db.getAllUsers();
   for (const [uid, ud] of Object.entries(all)) {
-    for (const coin of ['ltc', 'trx']) {
+    for (const coin of ['ltc', 'sol']) {
       if (!ud[`${coin}Address`]) continue;
       try {
         const onChain = coin === 'ltc'
           ? await checkLTCBalance(ud[`${coin}Address`])
-          : await checkTRXBalance(ud[`${coin}Address`]);
+          : await checkSOLBalance(ud[`${coin}Address`]);
         const recorded = ud[`${coin}OnChain`] || 0;
         if (onChain > recorded) {
           const newDep = onChain - recorded;
