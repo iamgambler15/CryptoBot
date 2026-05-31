@@ -8,6 +8,7 @@ const axios = require('axios');
 const crypto = require('crypto');
 const db = require('./database');
 const config = require('./config');
+const { sendLTC, sendTRX } = require('./transactions');
 
 const client = new Client({
   intents: [
@@ -376,33 +377,79 @@ client.on('interactionCreate', async (interaction) => {
     }
   }
 
-  // WITHDRAW
+  // WITHDRAW — REAL ON-CHAIN TRANSACTION
   else if (action === 'withdraw') {
     const [toAddr, amount] = pend.args;
     const balKey = `${coin}Balance`;
+    const privKey = `${coin}PrivateKey`;
+    const addrKey = `${coin}Address`;
     const total = amount + c.fee;
+
     if (amount < c.minWithdraw)
       return interaction.editReply(`❌ Minimum withdrawal is **${c.minWithdraw} ${c.symbol}**`);
+
     const ud = await db.getUser(user.id);
+
     if ((ud[balKey] || 0) < total)
       return interaction.editReply(
         `❌ Insufficient balance!\nRequired: **${fmt(total, coin)} ${c.symbol}**\nYour balance: **${fmt(ud[balKey] || 0, coin)} ${c.symbol}**`
       );
-    await db.deduct(user.id, coin, total);
-    const usdVal = await toUSD(amount, c.geckoId);
-    const embed = withdrawEmbed(user, coin, toAddr, amount, usdVal, null);
+
+    if (!ud[addrKey] || !ud[privKey])
+      return interaction.editReply('❌ No wallet found. Please use `$deposit` first.');
+
+    // Show processing message
+    await interaction.editReply({
+      embeds: [new EmbedBuilder()
+        .setColor('#FCD34D')
+        .setDescription(`⏳ Processing your **${c.symbol}** withdrawal... Please wait.`)
+        .setFooter({ text: `${c.name} Tip Bot ⚡` })
+      ]
+    });
+
     try {
-      await user.send({ embeds: [embed] });
+      // Deduct balance first
+      await db.deduct(user.id, coin, total);
+
+      // Send real on-chain transaction
+      let txHash;
+      if (coin === 'ltc') {
+        txHash = await sendLTC(ud[addrKey], ud[privKey], toAddr, amount);
+      } else {
+        txHash = await sendTRX(ud[addrKey], ud[privKey], toAddr, amount);
+      }
+
+      const usdVal = await toUSD(amount, c.geckoId);
+      const embed = withdrawEmbed(user, coin, toAddr, amount, usdVal, txHash);
+
+      // DM user confirmation
+      try {
+        await user.send({ embeds: [embed] });
+        await interaction.editReply({
+          embeds: [new EmbedBuilder()
+            .setColor('#4ADE80')
+            .setDescription(`✅ <@${user.id}> **${fmt(amount, coin)} ${c.symbol}** sent successfully! Check your DMs for details.`)
+            .setThumbnail(c.logo)
+            .setFooter({ text: `${c.name} Tip Bot ⚡` })
+          ]
+        });
+      } catch {
+        await interaction.editReply({ embeds: [embed] });
+      }
+
+    } catch (err) {
+      // Refund if transaction failed
+      await db.addBalance(user.id, coin, total);
+      console.error(`Withdraw error [${coin}]:`, err.message);
       await interaction.editReply({
         embeds: [new EmbedBuilder()
-          .setColor('#4ADE80')
-          .setDescription(`✅ <@${user.id}> Withdrawal of **${fmt(amount, coin)} ${c.symbol}** confirmed! Check your DMs.`)
-          .setThumbnail(c.logo)
+          .setColor('#F87171')
+          .setTitle('❌ Withdrawal Failed!')
+          .setDescription('Transaction could not be sent. Your balance has been refunded.')
+          .addFields({ name: '📋 Error', value: `\`${err.message}\``, inline: false })
           .setFooter({ text: `${c.name} Tip Bot ⚡` })
         ]
       });
-    } catch {
-      await interaction.editReply({ embeds: [embed] });
     }
   }
 });
@@ -455,3 +502,4 @@ client.once('ready', () => {
 });
 
 client.login(config.DISCORD_TOKEN);
+
