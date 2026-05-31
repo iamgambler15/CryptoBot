@@ -308,10 +308,7 @@ client.on('messageCreate', async (message) => {
       toUSD(ud.trxBalance || 0, 'tron'),
     ]);
     const embed = balEmbed(u, ud.ltcBalance || 0, ltcUsd, ud.trxBalance || 0, trxUsd);
-    if (isDM) return message.reply({ embeds: [embed] });
-    try { await u.send({ embeds: [embed] }); message.reply('✅ Balance has been sent to your DMs!'); }
-    catch { message.reply({ embeds: [embed] }); }
-    return;
+    return message.reply({ embeds: [embed] });
   }
  
   if (cmd === '$deposit') {
@@ -755,3 +752,4 @@ client.on('interactionCreate', async (interaction) => {
     )],
   });
 });
+ 
