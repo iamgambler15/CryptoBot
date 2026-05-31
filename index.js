@@ -493,7 +493,7 @@ setInterval(async () => {
       } catch {}
     }
   }
-}, 2 * 60 * 1000);
+}, 10 * 60 * 1000);
 
 client.once('ready', () => {
   console.log(`✅ Bot online: ${client.user.tag}`);
@@ -502,4 +502,5 @@ client.once('ready', () => {
 });
 
 client.login(config.DISCORD_TOKEN);
+
 
