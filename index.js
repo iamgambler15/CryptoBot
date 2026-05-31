@@ -1,4 +1,3 @@
-
 require('dotenv').config();
  
 const {
@@ -115,6 +114,24 @@ async function toUSD(amount, geckoId) {
 }
  
 const pending = new Map();
+ 
+// ─── PARSE AMOUNT ────────────────────────────────────────────────────────────
+// Returns { amount, isUSD }
+// $1 or 1$ = USD mode, 0.5 = coin mode
+function parseAmount(str) {
+  if (!str) return { amount: NaN, isUSD: false };
+  const s = str.toString().trim();
+  const isUSD = s.includes('$');
+  const amount = parseFloat(s.replace(/\$/g, '').trim());
+  return { amount, isUSD };
+}
+ 
+// Convert USD to coin amount using live price
+async function usdToCoin(usdAmount, geckoId) {
+  const price = await getPrice(geckoId);
+  if (!price || !price.usd) return null;
+  return usdAmount / price.usd;
+}
  
 // ─── EMBEDS ───────────────────────────────────────────────────────────────────
 function selectEmbed(action) {
@@ -310,36 +327,36 @@ client.on('messageCreate', async (message) => {
   if (cmd === '$tip') {
     if (isDM) return message.reply('❌ Please use `$tip` in a server channel.');
     const mention = message.mentions.users.first();
-    const amount = parseFloat(args[2]);
-    if (!mention || isNaN(amount) || amount <= 0)
-      return message.reply('❌ Usage: `$tip @user <amount>`\nExample: `$tip @John 0.5`');
+    const parsed = parseAmount(args[2]);
+    if (!mention || isNaN(parsed.amount) || parsed.amount <= 0)
+      return message.reply('❌ Usage: `$tip @user <amount>`\nExample: `$tip @John $1` or `$tip @John 0.5`');
     if (mention.id === message.author.id) return message.reply('❌ You cannot tip yourself!');
     if (mention.bot) return message.reply('❌ You cannot tip a bot!');
-    pending.set(message.author.id, { action: 'tip', args: [mention.id, amount] });
+    pending.set(message.author.id, { action: 'tip', args: [mention.id, parsed.amount, parsed.isUSD] });
     return message.reply({ embeds: [selectEmbed('tip')], components: [selectRow('tip')] });
   }
  
   if (cmd === '$withdraw') {
     const toAddr = args[1];
-    const amount = parseFloat(args[2]);
-    if (!toAddr || isNaN(amount) || amount <= 0)
-      return message.reply('❌ Usage: `$withdraw <address> <amount>`\nExample: `$withdraw LAddr... 0.5`');
-    pending.set(message.author.id, { action: 'withdraw', args: [toAddr, amount] });
+    const parsed = parseAmount(args[2]);
+    if (!toAddr || isNaN(parsed.amount) || parsed.amount <= 0)
+      return message.reply('❌ Usage: `$withdraw <address> <amount>`\nExample: `$withdraw LAddr... $1` or `$withdraw LAddr... 0.5`');
+    pending.set(message.author.id, { action: 'withdraw', args: [toAddr, parsed.amount, parsed.isUSD] });
     return message.reply({ embeds: [selectEmbed('withdraw')], components: [selectRow('withdraw')] });
   }
  
   // $airdrop <amount> <seconds> — e.g. $airdrop 1 30
   if (cmd === '$airdrop') {
     if (isDM) return message.reply('❌ Use `$airdrop` in a server channel.');
-    const amount = parseFloat(args[1]);
-    const seconds = parseInt(args[2]);
+    const parsed = parseAmount(args[1]);
+    const seconds = parseInt(args[2]?.replace(/\$/g, ''));
  
-    if (isNaN(amount) || amount <= 0)
-      return message.reply('❌ Usage: `$airdrop <amount> <seconds>`\nExample: `$airdrop 1 30`');
+    if (isNaN(parsed.amount) || parsed.amount <= 0)
+      return message.reply('❌ Usage: `$airdrop <amount> <seconds>`\nExample: `$airdrop $1 30` or `$airdrop 0.5 30`');
     if (isNaN(seconds) || seconds < 5 || seconds > 300)
       return message.reply('❌ Time must be between **5** and **300** seconds.');
  
-    pending.set(message.author.id, { action: 'airdrop', args: [amount, seconds] });
+    pending.set(message.author.id, { action: 'airdrop', args: [parsed.amount, seconds, parsed.isUSD] });
     return message.reply({ embeds: [selectEmbed('airdrop')], components: [selectRow('airdrop')] });
   }
  
@@ -367,14 +384,22 @@ client.on('interactionCreate', async (interaction) => {
  
   // ── AIRDROP ────────────────────────────────────────────────────────────────
   if (action === 'airdrop') {
-    const [amount, seconds] = pend.args;
+    const [rawAmount, seconds, isUSD] = pend.args;
     const balKey = `${coin}Balance`;
     const c = COINS[coin];
+ 
+    // Convert USD to coin if needed
+    let amount = rawAmount;
+    if (isUSD) {
+      const converted = await usdToCoin(rawAmount, c.geckoId);
+      if (!converted) return interaction.editReply('❌ Could not fetch price. Try again.');
+      amount = converted;
+    }
  
     // Check balance
     const ud = await db.getUser(user.id);
     if ((ud[balKey] || 0) < amount)
-      return interaction.editReply(`❌ Insufficient balance!\nYour ${c.symbol}: **${fmt(ud[balKey] || 0, coin)}**`);
+      return interaction.editReply(`❌ Insufficient balance!\nYour ${c.symbol}: **${fmt(ud[balKey] || 0, coin)}**\n${isUSD ? `($${rawAmount} = ${fmt(amount, coin)} ${c.symbol})` : ''}`);
  
     // Deduct from host
     await db.deduct(user.id, coin, amount);
@@ -532,14 +557,23 @@ client.on('interactionCreate', async (interaction) => {
  
   // TIP
   else if (action === 'tip') {
-    const [receiverId, amount] = pend.args;
+    const [receiverId, rawAmount, isUSD] = pend.args;
     const balKey = `${coin}Balance`;
-    if (amount < c.minTip) return interaction.editReply(`❌ Minimum tip amount is **${c.minTip} ${c.symbol}**`);
+ 
+    // Convert USD to coin if needed
+    let amount = rawAmount;
+    if (isUSD) {
+      const converted = await usdToCoin(rawAmount, c.geckoId);
+      if (!converted) return interaction.editReply('❌ Could not fetch price. Try again.');
+      amount = converted;
+    }
+ 
+    if (amount < c.minTip) return interaction.editReply(`❌ Minimum tip is **${c.minTip} ${c.symbol}** ≈ **$${(c.minTip * ((await getPrice(c.geckoId))?.usd||0)).toFixed(2)}**`);
     const ud = await db.getUser(user.id);
     if ((ud[balKey] || 0) < amount)
-      return interaction.editReply(`❌ Insufficient balance!\nYour ${c.symbol} balance: **${fmt(ud[balKey] || 0, coin)}**`);
+      return interaction.editReply(`❌ Insufficient balance!\nYour ${c.symbol}: **${fmt(ud[balKey] || 0, coin)}**\n${isUSD ? `($${rawAmount} = ${fmt(amount, coin)} ${c.symbol})` : ''}`);
     await db.transfer(user.id, receiverId, coin, amount);
-    const usdVal = await toUSD(amount, c.geckoId);
+    const usdVal = isUSD ? rawAmount.toFixed(2) : await toUSD(amount, c.geckoId);
     const receiver = await client.users.fetch(receiverId).catch(() => null);
     await interaction.editReply({ embeds: [tipEmbed(user, receiver || { id: receiverId }, coin, amount, usdVal)] });
     if (receiver) {
@@ -560,14 +594,23 @@ client.on('interactionCreate', async (interaction) => {
  
   // WITHDRAW — REAL ON-CHAIN TRANSACTION
   else if (action === 'withdraw') {
-    const [toAddr, amount] = pend.args;
+    const [toAddr, rawAmount, isUSD] = pend.args;
     const balKey = `${coin}Balance`;
     const privKey = `${coin}PrivateKey`;
     const addrKey = `${coin}Address`;
+ 
+    // Convert USD to coin if needed
+    let amount = rawAmount;
+    if (isUSD) {
+      const converted = await usdToCoin(rawAmount, c.geckoId);
+      if (!converted) return interaction.editReply('❌ Could not fetch price. Try again.');
+      amount = converted;
+    }
+ 
     const total = amount + c.fee;
  
     if (amount < c.minWithdraw)
-      return interaction.editReply(`❌ Minimum withdrawal is **${c.minWithdraw} ${c.symbol}**`);
+      return interaction.editReply(`❌ Minimum withdrawal is **${c.minWithdraw} ${c.symbol}**${isUSD ? ` ≈ **$${(c.minWithdraw * ((await getPrice(c.geckoId))?.usd||0)).toFixed(2)}**` : ''}`);
  
     const ud = await db.getUser(user.id);
  
@@ -712,4 +755,3 @@ client.on('interactionCreate', async (interaction) => {
     )],
   });
 });
- 
