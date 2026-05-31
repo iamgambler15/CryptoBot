@@ -1,18 +1,35 @@
-const fs = require('fs');
-const path = require('path');
-const DB_PATH = path.join(__dirname, 'data', 'users.json');
+const axios = require('axios');
 
-if (!fs.existsSync(path.join(__dirname, 'data'))) {
-  fs.mkdirSync(path.join(__dirname, 'data'), { recursive: true });
+const JSONBIN_KEY = process.env.JSONBIN_KEY;
+const JSONBIN_ID = process.env.JSONBIN_ID;
+const BASE_URL = `https://api.jsonbin.io/v3/b/${JSONBIN_ID}`;
+
+const HEADERS = {
+  'X-Master-Key': JSONBIN_KEY,
+  'Content-Type': 'application/json',
+};
+
+// ─── LOAD ALL DATA ────────────────────────────────────────────────────────────
+async function load() {
+  try {
+    const res = await axios.get(`${BASE_URL}/latest`, { headers: HEADERS });
+    return res.data.record || {};
+  } catch (err) {
+    console.error('JSONBin load error:', err.message);
+    return {};
+  }
 }
 
-function load() {
-  if (!fs.existsSync(DB_PATH)) { fs.writeFileSync(DB_PATH, '{}'); return {}; }
-  try { return JSON.parse(fs.readFileSync(DB_PATH, 'utf8')); } catch { return {}; }
+// ─── SAVE ALL DATA ────────────────────────────────────────────────────────────
+async function save(data) {
+  try {
+    await axios.put(BASE_URL, data, { headers: HEADERS });
+  } catch (err) {
+    console.error('JSONBin save error:', err.message);
+  }
 }
 
-function save(data) { fs.writeFileSync(DB_PATH, JSON.stringify(data, null, 2)); }
-
+// ─── ENSURE USER EXISTS ───────────────────────────────────────────────────────
 function ensureUser(db, userId) {
   if (!db[userId]) {
     db[userId] = {
@@ -24,40 +41,45 @@ function ensureUser(db, userId) {
   return db[userId];
 }
 
-function getUser(userId) {
-  const db = load();
+// ─── GET USER ─────────────────────────────────────────────────────────────────
+async function getUser(userId) {
+  const db = await load();
   ensureUser(db, userId);
-  save(db);
+  await save(db);
   return db[userId];
 }
 
-function setAddress(userId, coin, address, privateKey) {
-  const db = load();
+// ─── SET ADDRESS ──────────────────────────────────────────────────────────────
+async function setAddress(userId, coin, address, privateKey) {
+  const db = await load();
   ensureUser(db, userId);
   db[userId][`${coin}Address`] = address;
   db[userId][`${coin}PrivateKey`] = privateKey;
-  save(db);
+  await save(db);
 }
 
-function addBalance(userId, coin, amount) {
-  const db = load();
+// ─── ADD BALANCE ──────────────────────────────────────────────────────────────
+async function addBalance(userId, coin, amount) {
+  const db = await load();
   ensureUser(db, userId);
   db[userId][`${coin}Balance`] = (db[userId][`${coin}Balance`] || 0) + amount;
   db[userId].transactions.push({ type: 'deposit', coin, amount, ts: Date.now() });
-  save(db);
+  await save(db);
 }
 
-function deduct(userId, coin, amount) {
-  const db = load();
+// ─── DEDUCT BALANCE ───────────────────────────────────────────────────────────
+async function deduct(userId, coin, amount) {
+  const db = await load();
   if (!db[userId] || (db[userId][`${coin}Balance`] || 0) < amount) return false;
   db[userId][`${coin}Balance`] -= amount;
   db[userId].transactions.push({ type: 'withdraw', coin, amount, ts: Date.now() });
-  save(db);
+  await save(db);
   return true;
 }
 
-function transfer(fromId, toId, coin, amount) {
-  const db = load();
+// ─── TRANSFER ─────────────────────────────────────────────────────────────────
+async function transfer(fromId, toId, coin, amount) {
+  const db = await load();
   const bk = `${coin}Balance`;
   if (!db[fromId] || (db[fromId][bk] || 0) < amount) return false;
   ensureUser(db, toId);
@@ -66,17 +88,21 @@ function transfer(fromId, toId, coin, amount) {
   const ts = Date.now();
   db[fromId].transactions.push({ type: 'tip_sent', coin, to: toId, amount, ts });
   db[toId].transactions.push({ type: 'tip_received', coin, from: fromId, amount, ts });
-  save(db);
+  await save(db);
   return true;
 }
 
-function setOnChain(userId, coin, amount) {
-  const db = load();
+// ─── SET ON CHAIN ─────────────────────────────────────────────────────────────
+async function setOnChain(userId, coin, amount) {
+  const db = await load();
   if (!db[userId]) return;
   db[userId][`${coin}OnChain`] = amount;
-  save(db);
+  await save(db);
 }
 
-function getAllUsers() { return load(); }
+// ─── GET ALL USERS ────────────────────────────────────────────────────────────
+async function getAllUsers() {
+  return await load();
+}
 
 module.exports = { getUser, setAddress, addBalance, deduct, transfer, setOnChain, getAllUsers };
