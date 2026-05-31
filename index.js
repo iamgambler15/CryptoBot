@@ -19,7 +19,6 @@ const client = new Client({
   partials: ['CHANNEL', 'MESSAGE'],
 });
 
-// ─── COIN INFO ────────────────────────────────────────────────────────────────
 const COINS = {
   ltc: {
     name: 'Litecoin', symbol: 'LTC', emoji: '🔘', color: '#A8A9AD',
@@ -37,7 +36,7 @@ const COINS = {
   },
 };
 
-// ─── ADDRESS GENERATION (Local — No API needed) ───────────────────────────────
+// ─── ADDRESS GENERATION ───────────────────────────────────────────────────────
 function generateLTCAddress() {
   try {
     const bs58check = require('bs58check');
@@ -89,7 +88,6 @@ async function getPrice(geckoId) {
   } catch { return null; }
 }
 
-// ─── BALANCE CHECK ────────────────────────────────────────────────────────────
 async function checkLTCBalance(address) {
   try {
     const res = await axios.get(`https://api.blockcypher.com/v1/ltc/main/addrs/${address}/balance`, { timeout: 5000 });
@@ -105,19 +103,18 @@ async function checkTRXBalance(address) {
   } catch { return 0; }
 }
 
-// ─── HELPERS ──────────────────────────────────────────────────────────────────
 function fmt(amount, coin) {
   return coin === 'ltc' ? parseFloat(amount || 0).toFixed(8) : parseFloat(amount || 0).toFixed(2);
 }
+
 async function toUSD(amount, geckoId) {
   const p = await getPrice(geckoId);
   return p ? (amount * p.usd).toFixed(2) : '?';
 }
 
-// ─── PENDING MAP ──────────────────────────────────────────────────────────────
 const pending = new Map();
 
-// ─── COIN SELECT UI ───────────────────────────────────────────────────────────
+// ─── EMBEDS ───────────────────────────────────────────────────────────────────
 function selectEmbed(action) {
   const label = { deposit: '💳 Deposit', withdraw: '📤 Withdraw', tip: '🎁 Tip', price: '💹 Price' }[action] || '⚡ Select';
   return new EmbedBuilder()
@@ -139,7 +136,6 @@ function selectRow(action) {
   );
 }
 
-// ─── EMBEDS ───────────────────────────────────────────────────────────────────
 function depositEmbed(user, coin, address, balance, usdVal) {
   const c = COINS[coin];
   return new EmbedBuilder()
@@ -169,7 +165,7 @@ function withdrawEmbed(user, coin, toAddr, amount, usdVal, txHash) {
       { name: '📤 Amount Sent', value: `**${fmt(amount, coin)} ${c.symbol}** ≈ **$${usdVal} USD**`, inline: true },
       { name: '💸 Network Fee', value: c.fee === 0 ? '**FREE ✅**' : `**${c.fee} ${c.symbol}**`, inline: true },
       { name: '📬 Recipient Address', value: `\`${toAddr}\``, inline: false },
-      { name: '🔗 Transaction', value: txHash ? `[\`${txHash.slice(0, 20)}...\`](${c.explorer}${txHash})` : '`Processing...`', inline: false },
+      { name: '🔗 Transaction', value: txHash ? `[\`${txHash.slice(0,20)}...\`](${c.explorer}${txHash})` : '`Processing...`', inline: false },
       { name: '📡 Explorer', value: `[View on Explorer ↗](${c.addrExplorer}${toAddr})`, inline: true },
       { name: '⏱️ Status', value: '`Broadcasted to Network ✅`', inline: true },
     )
@@ -254,7 +250,7 @@ client.on('messageCreate', async (message) => {
 
   if (cmd === '$bal' || cmd === '$bals' || cmd === '$balance') {
     const u = message.author;
-    const ud = db.getUser(u.id);
+    const ud = await db.getUser(u.id);
     const [ltcUsd, trxUsd] = await Promise.all([
       toUSD(ud.ltcBalance || 0, 'litecoin'),
       toUSD(ud.trxBalance || 0, 'tron'),
@@ -314,22 +310,18 @@ client.on('interactionCreate', async (interaction) => {
     return interaction.reply({ content: '❌ Please run the command again.', ephemeral: true });
 
   pending.delete(user.id);
-
-  // ── Delete the coin-select message so it disappears cleanly ────────────────
   try { await interaction.message.delete(); } catch {}
-
-  // ── Defer a follow-up (public in channel, or ephemeral for DM-only actions) 
   await interaction.deferReply({ ephemeral: false });
 
   // DEPOSIT
   if (action === 'deposit') {
-    let ud = db.getUser(user.id);
+    let ud = await db.getUser(user.id);
     const addrKey = `${coin}Address`;
     if (!ud[addrKey]) {
       const wallet = coin === 'ltc' ? generateLTCAddress() : generateTRXAddress();
-      if (!wallet) return interaction.editReply({ content: '❌ Failed to generate wallet. Please try again.', ephemeral: true });
-      db.setAddress(user.id, coin, wallet.address, wallet.privateKey);
-      ud = db.getUser(user.id);
+      if (!wallet) return interaction.editReply('❌ Failed to generate wallet. Please try again.');
+      await db.setAddress(user.id, coin, wallet.address, wallet.privateKey);
+      ud = await db.getUser(user.id);
     }
     const bal = ud[`${coin}Balance`] || 0;
     const usdVal = await toUSD(bal, c.geckoId);
@@ -361,13 +353,12 @@ client.on('interactionCreate', async (interaction) => {
     const [receiverId, amount] = pend.args;
     const balKey = `${coin}Balance`;
     if (amount < c.minTip) return interaction.editReply(`❌ Minimum tip amount is **${c.minTip} ${c.symbol}**`);
-    const ud = db.getUser(user.id);
+    const ud = await db.getUser(user.id);
     if ((ud[balKey] || 0) < amount)
       return interaction.editReply(`❌ Insufficient balance!\nYour ${c.symbol} balance: **${fmt(ud[balKey] || 0, coin)}**`);
-    db.transfer(user.id, receiverId, coin, amount);
+    await db.transfer(user.id, receiverId, coin, amount);
     const usdVal = await toUSD(amount, c.geckoId);
     const receiver = await client.users.fetch(receiverId).catch(() => null);
-    // Show tip result publicly in channel
     await interaction.editReply({ embeds: [tipEmbed(user, receiver || { id: receiverId }, coin, amount, usdVal)] });
     if (receiver) {
       const dmEmbed = new EmbedBuilder()
@@ -392,12 +383,12 @@ client.on('interactionCreate', async (interaction) => {
     const total = amount + c.fee;
     if (amount < c.minWithdraw)
       return interaction.editReply(`❌ Minimum withdrawal is **${c.minWithdraw} ${c.symbol}**`);
-    const ud = db.getUser(user.id);
+    const ud = await db.getUser(user.id);
     if ((ud[balKey] || 0) < total)
       return interaction.editReply(
         `❌ Insufficient balance!\nRequired: **${fmt(total, coin)} ${c.symbol}**\nYour balance: **${fmt(ud[balKey] || 0, coin)} ${c.symbol}**`
       );
-    db.deduct(user.id, coin, total);
+    await db.deduct(user.id, coin, total);
     const usdVal = await toUSD(amount, c.geckoId);
     const embed = withdrawEmbed(user, coin, toAddr, amount, usdVal, null);
     try {
@@ -416,9 +407,9 @@ client.on('interactionCreate', async (interaction) => {
   }
 });
 
-// ─── DEPOSIT MONITOR (every 2 minutes) ───────────────────────────────────────
+// ─── DEPOSIT MONITOR ──────────────────────────────────────────────────────────
 setInterval(async () => {
-  const all = db.getAllUsers();
+  const all = await db.getAllUsers();
   for (const [uid, ud] of Object.entries(all)) {
     for (const coin of ['ltc', 'trx']) {
       if (!ud[`${coin}Address`]) continue;
@@ -429,13 +420,14 @@ setInterval(async () => {
         const recorded = ud[`${coin}OnChain`] || 0;
         if (onChain > recorded) {
           const newDep = onChain - recorded;
-          db.addBalance(uid, coin, newDep);
-          db.setOnChain(uid, coin, onChain);
+          await db.addBalance(uid, coin, newDep);
+          await db.setOnChain(uid, coin, onChain);
           const user = await client.users.fetch(uid).catch(() => null);
           if (!user) continue;
           const c = COINS[coin];
           const usdVal = await toUSD(newDep, c.geckoId);
-          const newBal = db.getUser(uid)[`${coin}Balance`] || 0;
+          const freshUd = await db.getUser(uid);
+          const newBal = freshUd[`${coin}Balance`] || 0;
           const embed = new EmbedBuilder()
             .setColor('#4ADE80')
             .setAuthor({ name: `⚡ ${c.name} Tip Bot`, iconURL: c.logo })
@@ -459,6 +451,7 @@ setInterval(async () => {
 client.once('ready', () => {
   console.log(`✅ Bot online: ${client.user.tag}`);
   console.log('🔘 LTC Ready | 🔴 TRX Ready');
+  console.log('☁️ JSONBin Database Connected!');
 });
 
 client.login(config.DISCORD_TOKEN);
