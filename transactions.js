@@ -1,6 +1,5 @@
 require('dotenv').config();
 const axios = require('axios');
-const crypto = require('crypto');
  
 // ─── LTC REAL TRANSACTION via BlockCypher ─────────────────────────────────────
 async function sendLTC(fromAddress, fromPrivateKeyWIF, toAddress, amountLTC) {
@@ -9,7 +8,7 @@ async function sendLTC(fromAddress, fromPrivateKeyWIF, toAddress, amountLTC) {
     const BASE = 'https://api.blockcypher.com/v1/ltc/main';
     const amountSatoshis = Math.round(amountLTC * 1e8);
  
-    // ── Step 1: New TX skeleton ───────────────────────────────────────────────
+    // ── Step 1: Get TX skeleton ───────────────────────────────────────────────
     const skeletonRes = await axios.post(
       `${BASE}/txs/new?token=${TOKEN}`,
       {
@@ -24,31 +23,43 @@ async function sendLTC(fromAddress, fromPrivateKeyWIF, toAddress, amountLTC) {
     }
  
     const tmx = skeletonRes.data;
-    console.log('Skeleton received, tosign count:', tmx.tosign.length);
  
-    // ── Step 2: Sign using tiny-secp256k1 directly ───────────────────────────
-    const ecc = require('tiny-secp256k1');
+    // ── Step 2: Decode WIF private key ────────────────────────────────────────
     const bs58check = require('bs58check');
+    const ecc = require('tiny-secp256k1');
  
-    // Decode WIF to raw private key bytes
     const decoded = bs58check.decode(fromPrivateKeyWIF);
-    // WIF: 1 byte version + 32 bytes key + optional 1 byte compression flag
     const privKeyBytes = Uint8Array.from(decoded.slice(1, 33));
- 
-    // Get compressed public key
-    const pubKeyBytes = ecc.pointFromScalar(privKeyBytes, true);
+    const pubKeyBytes = ecc.pointFromScalar(privKeyBytes, true); // compressed
     const pubKeyHex = Buffer.from(pubKeyBytes).toString('hex');
  
-    // Sign each hash
+    // ── Step 3: Sign each hash in DER format ─────────────────────────────────
+    function toDER(signature) {
+      const r = signature.slice(0, 32);
+      const s = signature.slice(32, 64);
+ 
+      // Pad r and s if needed
+      const rPad = r[0] & 0x80 ? Buffer.concat([Buffer.from([0x00]), Buffer.from(r)]) : Buffer.from(r);
+      const sPad = s[0] & 0x80 ? Buffer.concat([Buffer.from([0x00]), Buffer.from(s)]) : Buffer.from(s);
+ 
+      const rLen = rPad.length;
+      const sLen = sPad.length;
+      const totalLen = 2 + rLen + 2 + sLen;
+ 
+      return Buffer.concat([
+        Buffer.from([0x30, totalLen]),
+        Buffer.from([0x02, rLen]), rPad,
+        Buffer.from([0x02, sLen]), sPad,
+      ]).toString('hex');
+    }
+ 
     const signatures = tmx.tosign.map(hashHex => {
       const hashBytes = Uint8Array.from(Buffer.from(hashHex, 'hex'));
       const sigBytes = ecc.sign(hashBytes, privKeyBytes);
-      return Buffer.from(sigBytes).toString('hex');
+      return toDER(sigBytes);
     });
  
-    console.log('Signed hashes:', signatures.length);
- 
-    // ── Step 3: Send signed TX ────────────────────────────────────────────────
+    // ── Step 4: Send signed TX ────────────────────────────────────────────────
     tmx.signatures = signatures;
     tmx.pubkeys = tmx.tosign.map(() => pubKeyHex);
  
@@ -62,12 +73,12 @@ async function sendLTC(fromAddress, fromPrivateKeyWIF, toAddress, amountLTC) {
       throw new Error(sendRes.data.errors.map(e => e.error).join(', '));
     }
  
-    console.log('LTC TX sent:', sendRes.data.tx.hash);
     return sendRes.data.tx.hash;
  
   } catch (err) {
-    console.error('LTC send error:', err.response?.data || err.message);
-    throw new Error(err.response?.data?.error || err.message);
+    const errMsg = err.response?.data?.error || err.response?.data?.errors?.[0]?.error || err.message;
+    console.error('LTC send error:', errMsg);
+    throw new Error(errMsg);
   }
 }
  
