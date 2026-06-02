@@ -1,5 +1,6 @@
 require('dotenv').config();
 const axios = require('axios');
+const crypto = require('crypto');
  
 // ─── LTC REAL TRANSACTION via BlockCypher ─────────────────────────────────────
 async function sendLTC(fromAddress, fromPrivateKeyWIF, toAddress, amountLTC) {
@@ -8,74 +9,65 @@ async function sendLTC(fromAddress, fromPrivateKeyWIF, toAddress, amountLTC) {
     const BASE = 'https://api.blockcypher.com/v1/ltc/main';
     const amountSatoshis = Math.round(amountLTC * 1e8);
  
-    // ── Step 1: Create transaction skeleton ───────────────────────────────────
-    const newTx = {
-      inputs: [{ addresses: [fromAddress] }],
-      outputs: [{ addresses: [toAddress], value: amountSatoshis }],
-    };
- 
+    // ── Step 1: New TX skeleton ───────────────────────────────────────────────
     const skeletonRes = await axios.post(
       `${BASE}/txs/new?token=${TOKEN}`,
-      newTx,
+      {
+        inputs: [{ addresses: [fromAddress] }],
+        outputs: [{ addresses: [toAddress], value: amountSatoshis }],
+      },
       { timeout: 15000 }
     );
  
     if (skeletonRes.data.errors) {
-      throw new Error(skeletonRes.data.errors[0].error);
+      throw new Error(skeletonRes.data.errors.map(e => e.error).join(', '));
     }
  
-    const skeleton = skeletonRes.data;
+    const tmx = skeletonRes.data;
+    console.log('Skeleton received, tosign count:', tmx.tosign.length);
  
-    // ── Step 2: Sign each input ───────────────────────────────────────────────
-    const bitcoin = require('bitcoinjs-lib');
-    const bs58check = require('bs58check');
-    const crypto = require('crypto');
- 
-    // Decode WIF private key
-    function wifToPrivateKey(wif) {
-      const decoded = bs58check.decode(wif);
-      // Remove version byte (1 byte) and compression flag (1 byte if present)
-      const keyBytes = decoded.slice(1, 33);
-      // Ensure Buffer not Uint8Array
-      return Buffer.from(keyBytes);
-    }
- 
-    const privateKeyBytes = wifToPrivateKey(fromPrivateKeyWIF);
-    const { ECPairFactory } = require('ecpair');
+    // ── Step 2: Sign using tiny-secp256k1 directly ───────────────────────────
     const ecc = require('tiny-secp256k1');
-    const ECPair = ECPairFactory(ecc);
-    const keyPair = ECPair.fromPrivateKey(privateKeyBytes);
+    const bs58check = require('bs58check');
+ 
+    // Decode WIF to raw private key bytes
+    const decoded = bs58check.decode(fromPrivateKeyWIF);
+    // WIF: 1 byte version + 32 bytes key + optional 1 byte compression flag
+    const privKeyBytes = Uint8Array.from(decoded.slice(1, 33));
+ 
+    // Get compressed public key
+    const pubKeyBytes = ecc.pointFromScalar(privKeyBytes, true);
+    const pubKeyHex = Buffer.from(pubKeyBytes).toString('hex');
  
     // Sign each hash
-    const signatures = skeleton.tosign.map(hashHex => {
-      const hash = Buffer.from(hashHex, 'hex');
-      const sig = keyPair.sign(hash);
-      // Fix: Convert Uint8Array to Buffer
-      return Buffer.from(sig instanceof Uint8Array ? sig : Uint8Array.from(sig)).toString('hex');
+    const signatures = tmx.tosign.map(hashHex => {
+      const hashBytes = Uint8Array.from(Buffer.from(hashHex, 'hex'));
+      const sigBytes = ecc.sign(hashBytes, privKeyBytes);
+      return Buffer.from(sigBytes).toString('hex');
     });
  
-    const pubkeys = skeleton.tosign.map(() =>
-      Buffer.from(
-        keyPair.publicKey instanceof Uint8Array ? keyPair.publicKey : Uint8Array.from(keyPair.publicKey)
-      ).toString('hex')
-    );
+    console.log('Signed hashes:', signatures.length);
  
-    skeleton.signatures = signatures;
-    skeleton.pubkeys = pubkeys;
+    // ── Step 3: Send signed TX ────────────────────────────────────────────────
+    tmx.signatures = signatures;
+    tmx.pubkeys = tmx.tosign.map(() => pubKeyHex);
  
-    // ── Step 3: Send signed transaction ──────────────────────────────────────
     const sendRes = await axios.post(
       `${BASE}/txs/send?token=${TOKEN}`,
-      skeleton,
+      tmx,
       { timeout: 15000 }
     );
  
-    if (sendRes.data.errors) throw new Error(sendRes.data.errors[0].error);
+    if (sendRes.data.errors) {
+      throw new Error(sendRes.data.errors.map(e => e.error).join(', '));
+    }
+ 
+    console.log('LTC TX sent:', sendRes.data.tx.hash);
     return sendRes.data.tx.hash;
  
   } catch (err) {
-    console.error('LTC send error:', err.message);
-    throw err;
+    console.error('LTC send error:', err.response?.data || err.message);
+    throw new Error(err.response?.data?.error || err.message);
   }
 }
  
