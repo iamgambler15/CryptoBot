@@ -35,7 +35,9 @@ async function sendLTC(fromAddress, fromPrivateKeyWIF, toAddress, amountLTC) {
     function wifToPrivateKey(wif) {
       const decoded = bs58check.decode(wif);
       // Remove version byte (1 byte) and compression flag (1 byte if present)
-      return decoded.slice(1, 33);
+      const keyBytes = decoded.slice(1, 33);
+      // Ensure Buffer not Uint8Array
+      return Buffer.from(keyBytes);
     }
  
     const privateKeyBytes = wifToPrivateKey(fromPrivateKeyWIF);
@@ -48,11 +50,14 @@ async function sendLTC(fromAddress, fromPrivateKeyWIF, toAddress, amountLTC) {
     const signatures = skeleton.tosign.map(hashHex => {
       const hash = Buffer.from(hashHex, 'hex');
       const sig = keyPair.sign(hash);
-      return Buffer.from(sig).toString('hex');
+      // Fix: Convert Uint8Array to Buffer
+      return Buffer.from(sig instanceof Uint8Array ? sig : Uint8Array.from(sig)).toString('hex');
     });
  
     const pubkeys = skeleton.tosign.map(() =>
-      keyPair.publicKey.toString('hex')
+      Buffer.from(
+        keyPair.publicKey instanceof Uint8Array ? keyPair.publicKey : Uint8Array.from(keyPair.publicKey)
+      ).toString('hex')
     );
  
     skeleton.signatures = signatures;
