@@ -1,25 +1,17 @@
+
 require('dotenv').config();
- 
-const {
-  Client, GatewayIntentBits, EmbedBuilder,
-  ActionRowBuilder, ButtonBuilder, ButtonStyle
-} = require('discord.js');
+const { Client, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
 const axios = require('axios');
 const crypto = require('crypto');
 const db = require('./database');
-const config = require('./config');
 const { sendLTC, sendSOL } = require('./transactions');
  
 const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent,
-    GatewayIntentBits.DirectMessages,
-  ],
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent, GatewayIntentBits.DirectMessages],
   partials: ['CHANNEL', 'MESSAGE'],
 });
  
+// ─── COINS ────────────────────────────────────────────────────────────────────
 const COINS = {
   ltc: {
     name: 'Litecoin', symbol: 'LTC', emoji: '🔘', color: '#A8A9AD',
@@ -43,41 +35,28 @@ function generateLTCAddress() {
     const bs58check = require('bs58check');
     const secp256k1 = require('secp256k1');
     const privateKeyBytes = crypto.randomBytes(32);
-    const wifPrefix = Buffer.from([0xB0]);
-    const wifPayload = Buffer.concat([wifPrefix, privateKeyBytes, Buffer.from([0x01])]);
+    const wifPayload = Buffer.concat([Buffer.from([0xB0]), privateKeyBytes, Buffer.from([0x01])]);
     const wif = bs58check.encode(wifPayload);
     const pubKey = secp256k1.publicKeyCreate(privateKeyBytes, true);
     const sha256 = crypto.createHash('sha256').update(pubKey).digest();
     const ripemd160 = crypto.createHash('ripemd160').update(sha256).digest();
-    const addressPayload = Buffer.concat([Buffer.from([0x30]), ripemd160]);
-    const address = bs58check.encode(addressPayload);
+    const address = bs58check.encode(Buffer.concat([Buffer.from([0x30]), ripemd160]));
     return { address, privateKey: wif };
-  } catch (err) {
-    console.error('LTC gen error:', err.message);
-    return null;
-  }
+  } catch (err) { console.error('LTC gen error:', err.message); return null; }
 }
  
 function generateSOLAddress() {
   try {
     const { Keypair } = require('@solana/web3.js');
     const keypair = Keypair.generate();
-    const address = keypair.publicKey.toBase58();
-    const privateKey = Buffer.from(keypair.secretKey).toString('hex');
-    return { address, privateKey };
-  } catch (err) {
-    console.error('SOL gen error:', err.message);
-    return null;
-  }
+    return { address: keypair.publicKey.toBase58(), privateKey: Buffer.from(keypair.secretKey).toString('hex') };
+  } catch (err) { console.error('SOL gen error:', err.message); return null; }
 }
  
-// ─── PRICE ────────────────────────────────────────────────────────────────────
+// ─── PRICE & BALANCE ──────────────────────────────────────────────────────────
 async function getPrice(geckoId) {
   try {
-    const res = await axios.get(
-      `https://api.coingecko.com/api/v3/simple/price?ids=${geckoId}&vs_currencies=usd&include_24hr_change=true`,
-      { timeout: 5000 }
-    );
+    const res = await axios.get(`https://api.coingecko.com/api/v3/simple/price?ids=${geckoId}&vs_currencies=usd&include_24hr_change=true`, { timeout: 5000 });
     return res.data[geckoId];
   } catch { return null; }
 }
@@ -93,14 +72,14 @@ async function checkSOLBalance(address) {
   try {
     const { Connection, PublicKey, clusterApiUrl } = require('@solana/web3.js');
     const connection = new Connection(clusterApiUrl('mainnet-beta'));
-    const pubKey = new PublicKey(address);
-    const balance = await connection.getBalance(pubKey);
-    return balance / 1e9; // lamports to SOL
+    const balance = await connection.getBalance(new PublicKey(address));
+    return balance / 1e9;
   } catch { return 0; }
 }
  
+// ─── HELPERS ──────────────────────────────────────────────────────────────────
 function fmt(amount, coin) {
-  return coin === 'ltc' ? parseFloat(amount || 0).toFixed(8) : parseFloat(amount || 0).toFixed(2);
+  return coin === 'ltc' ? parseFloat(amount || 0).toFixed(8) : parseFloat(amount || 0).toFixed(6);
 }
  
 async function toUSD(amount, geckoId) {
@@ -108,48 +87,81 @@ async function toUSD(amount, geckoId) {
   return p ? (amount * p.usd).toFixed(2) : '?';
 }
  
-const pending = new Map();
- 
-// ─── PARSE AMOUNT ────────────────────────────────────────────────────────────
-// Returns { amount, isUSD }
-// $1 or 1$ = USD mode, 0.5 = coin mode
+// Parse amount: "1$", "$1", "1" → { amount: 1, isUSD: true/false }
 function parseAmount(str) {
   if (!str) return { amount: NaN, isUSD: false };
   const s = str.toString().trim();
   const isUSD = s.includes('$');
-  const amount = parseFloat(s.replace(/\$/g, '').trim());
-  return { amount, isUSD };
+  return { amount: parseFloat(s.replace(/\$/g, '').trim()), isUSD };
 }
  
-// Convert USD to coin amount using live price
 async function usdToCoin(usdAmount, geckoId) {
-  const price = await getPrice(geckoId);
-  if (!price || !price.usd) return null;
-  return usdAmount / price.usd;
+  const p = await getPrice(geckoId);
+  return p ? usdAmount / p.usd : null;
 }
  
-// ─── EMBEDS ───────────────────────────────────────────────────────────────────
-function selectEmbed(action) {
-  const label = { deposit: '💳 Deposit', withdraw: '📤 Withdraw', tip: '🎁 Tip', price: '💹 Price', airdrop: '🪂 Airdrop' }[action] || '⚡ Select';
-  return new EmbedBuilder()
-    .setColor('#5865F2')
-    .setTitle(`${label} — Select Your Coin`)
-    .setDescription('Choose which coin you want to use:')
-    .addFields(
-      { name: '🔘 Litecoin (LTC)', value: '`Fee: 0.0001 LTC • Reliable Network`', inline: true },
-      { name: '🟣 Solana (SOL)', value: '`Fee: ~$0.00025 • Ultra Fast`', inline: true },
-    )
-    .setFooter({ text: 'LTC & SOL Tip Bot ⚡' })
-    .setTimestamp();
+// Parse coin from args: "ltc" or "sol"
+function parseCoin(args, startIdx = 0) {
+  for (let i = startIdx; i < args.length; i++) {
+    const a = args[i].toLowerCase().replace(/\$/g, '');
+    if (a === 'ltc' || a === 'sol') return a;
+  }
+  return null;
 }
  
-function selectRow(action) {
+// ─── ACTIVE MAPS ──────────────────────────────────────────────────────────────
+const activeAirdrops = new Map();
+const activeRedPackets = new Map();
+ 
+// ─── COIN SELECT UI ───────────────────────────────────────────────────────────
+function coinSelectRow(action) {
   return new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId(`${action}__ltc`).setLabel('🔘 Litecoin (LTC)').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId(`${action}__sol`).setLabel('🟣 Solana (SOL)').setStyle(ButtonStyle.Primary),
   );
 }
  
+function coinSelectEmbed(action) {
+  const labels = { deposit: '💳 Deposit', withdraw: '📤 Withdraw' };
+  return new EmbedBuilder()
+    .setColor('#5865F2')
+    .setTitle(`${labels[action] || '⚡ Select'} — Choose Your Coin`)
+    .setDescription('Which coin do you want to use?')
+    .addFields(
+      { name: '🔘 Litecoin (LTC)', value: '`Fee: 0.0001 LTC`', inline: true },
+      { name: '🟣 Solana (SOL)', value: '`Fee: ~$0.00025`', inline: true },
+    )
+    .setFooter({ text: 'LTC & SOL Tip Bot ⚡' })
+    .setTimestamp();
+}
+ 
+// Withdraw amount select embed
+function withdrawAmountEmbed(coin) {
+  const c = COINS[coin];
+  return new EmbedBuilder()
+    .setColor(c.color)
+    .setAuthor({ name: `⚡ ${c.name} Tip Bot`, iconURL: c.logo })
+    .setTitle(`📤 Withdraw ${c.symbol} — Select Amount`)
+    .setThumbnail(c.logo)
+    .setDescription('Choose how much you want to withdraw:')
+    .addFields(
+      { name: '💡 Quick Amounts', value: 'Click a button below or type custom amount', inline: false },
+    )
+    .setFooter({ text: `${c.name} Tip Bot ⚡` })
+    .setTimestamp();
+}
+ 
+function withdrawAmountRow(coin) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`wamt__${coin}__1`).setLabel('$1').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId(`wamt__${coin}__5`).setLabel('$5').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId(`wamt__${coin}__10`).setLabel('$10').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId(`wamt__${coin}__25`).setLabel('$25').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId(`wamt__${coin}__all`).setLabel('All 💰').setStyle(ButtonStyle.Danger),
+  );
+}
+ 
+// ─── EMBEDS ───────────────────────────────────────────────────────────────────
 function depositEmbed(user, coin, address, balance, usdVal) {
   const c = COINS[coin];
   return new EmbedBuilder()
@@ -168,7 +180,7 @@ function depositEmbed(user, coin, address, balance, usdVal) {
     .setTimestamp();
 }
  
-function withdrawEmbed(user, coin, toAddr, amount, usdVal, txHash) {
+function withdrawConfirmEmbed(user, coin, toAddr, amount, usdVal, txHash) {
   const c = COINS[coin];
   return new EmbedBuilder()
     .setColor('#4ADE80')
@@ -177,11 +189,11 @@ function withdrawEmbed(user, coin, toAddr, amount, usdVal, txHash) {
     .setThumbnail(c.logo)
     .addFields(
       { name: '📤 Amount Sent', value: `**${fmt(amount, coin)} ${c.symbol}** ≈ **$${usdVal} USD**`, inline: true },
-      { name: '💸 Network Fee', value: c.fee === 0 ? '**FREE ✅**' : `**${c.fee} ${c.symbol}**`, inline: true },
+      { name: '💸 Network Fee', value: `**${c.fee} ${c.symbol}**`, inline: true },
       { name: '📬 Recipient Address', value: `\`${toAddr}\``, inline: false },
       { name: '🔗 Transaction', value: txHash ? `[\`${txHash.slice(0,20)}...\`](${c.explorer}${txHash})` : '`Processing...`', inline: false },
       { name: '📡 Explorer', value: `[View on Explorer ↗](${c.addrExplorer}${toAddr})`, inline: true },
-      { name: '⏱️ Status', value: '`Broadcasted to Network ✅`', inline: true },
+      { name: '⏱️ Status', value: '`Broadcasted ✅`', inline: true },
     )
     .setFooter({ text: `${user.tag} • ${c.name} Tip Bot`, iconURL: user.displayAvatarURL() })
     .setTimestamp();
@@ -198,13 +210,13 @@ function tipEmbed(sender, receiver, coin, amount, usdVal) {
       { name: '👤 From', value: `<@${sender.id}>`, inline: true },
       { name: '🎯 To', value: `<@${receiver.id}>`, inline: true },
       { name: `${c.emoji} Amount`, value: `**${fmt(amount, coin)} ${c.symbol}** ≈ **$${usdVal} USD**`, inline: false },
-      { name: '💸 Network Fee', value: c.fee === 0 ? '**FREE ✅**' : `**${c.fee} ${c.symbol}**`, inline: true },
+      { name: '💸 Network Fee', value: '`Internal Transfer — No Fee`', inline: true },
     )
-    .setFooter({ text: `${c.name} Tip Bot ⚡ • Low & Zero Fees` })
+    .setFooter({ text: `${c.name} Tip Bot ⚡ • Fast & Low Fees` })
     .setTimestamp();
 }
  
-function balEmbed(user, ltcBal, ltcUsd, trxBal, trxUsd) {
+function balEmbed(user, ltcBal, ltcUsd, solBal, solUsd) {
   return new EmbedBuilder()
     .setColor('#38BDF8')
     .setAuthor({ name: '⚡ Tip Bot', iconURL: COINS.ltc.logo })
@@ -212,7 +224,7 @@ function balEmbed(user, ltcBal, ltcUsd, trxBal, trxUsd) {
     .setThumbnail(COINS.ltc.logo)
     .addFields(
       { name: '🔘 Litecoin (LTC)', value: `**${fmt(ltcBal, 'ltc')} LTC**\n≈ **$${ltcUsd} USD**`, inline: true },
-      { name: '🟣 Solana (SOL)', value: `**${fmt(trxBal, 'sol')} SOL**\n≈ **$${trxUsd} USD**`, inline: true },
+      { name: '🟣 Solana (SOL)', value: `**${fmt(solBal, 'sol')} SOL**\n≈ **$${solUsd} USD**`, inline: true },
     )
     .setFooter({ text: `${user.tag} • Tip Bot`, iconURL: user.displayAvatarURL() })
     .setTimestamp();
@@ -234,36 +246,10 @@ function priceEmbed(coin, price) {
     .setTimestamp();
 }
  
-function helpEmbed() {
-  return new EmbedBuilder()
-    .setColor('#A78BFA')
-    .setAuthor({ name: '⚡ LTC & TRX Tip Bot', iconURL: COINS.ltc.logo })
-    .setTitle('📖 Bot Commands')
-    .setDescription('> Select your coin using the buttons after each command!')
-    .addFields(
-      { name: '💳 `$deposit`', value: 'Get your deposit address via DM', inline: false },
-      { name: '📤 `$withdraw <address> <amount>`', value: 'Example: `$withdraw TAddr... 100`', inline: false },
-      { name: '🎁 `$tip @user <amount>`', value: 'Example: `$tip @John 0.5`', inline: false },
-      { name: '👛 `$bal` / `$bals`', value: 'Check your LTC & TRX balance', inline: false },
-      { name: '💹 `$price`', value: 'Check live LTC or TRX price', inline: false },
-      { name: '🪂 `$airdrop <amount> <seconds>`', value: 'Example: `$airdrop 1 30` — Drop coins to joiners!', inline: false },
-      { name: '❓ `$help`', value: 'Show this help menu', inline: false },
-      { name: '💡 Network Fees', value: '🔘 LTC: `0.0001 LTC` | 🟣 SOL: `~$0.00025`', inline: false },
-    )
-    .setFooter({ text: 'LTC & SOL Tip Bot ⚡ • Fast & Low Fees' })
-    .setTimestamp();
-}
- 
- 
-// ─── ACTIVE AIRDROPS ─────────────────────────────────────────────────────────
-const activeAirdrops = new Map();
- 
 function airdropEmbed(hostId, coin, amount, secondsLeft, participants, usdVal, ended = false) {
   const c = COINS[coin];
   const count = participants.size;
-  const perPerson = count > 0
-    ? (amount / count).toFixed(coin === 'ltc' ? 8 : 2)
-    : fmt(amount, coin);
+  const perPerson = count > 0 ? (amount / count).toFixed(coin === 'ltc' ? 8 : 6) : fmt(amount, coin);
   return new EmbedBuilder()
     .setColor(ended ? '#4ADE80' : c.color)
     .setAuthor({ name: `⚡ ${c.name} Tip Bot`, iconURL: c.logo })
@@ -273,18 +259,55 @@ function airdropEmbed(hostId, coin, amount, secondsLeft, participants, usdVal, e
       { name: '👤 Host', value: `<@${hostId}>`, inline: true },
       { name: `${c.emoji} Total`, value: `**${fmt(amount, coin)} ${c.symbol}** ≈ **$${usdVal} USD**`, inline: true },
       { name: '⏱️ Time Left', value: ended ? '`Ended`' : `**${secondsLeft}s**`, inline: true },
-      { name: '👥 Participants', value: count > 0
-        ? `**${count} joined** — Each gets **${perPerson} ${c.symbol}**`
-        : '`Be the first to join!`', inline: false },
+      { name: '👥 Participants', value: count > 0 ? `**${count} joined** — Each gets **${perPerson} ${c.symbol}**` : '`Be the first to join!`', inline: false },
       { name: ended ? '🎉 Winners' : '📌 How to Join',
-        value: ended
-          ? (count > 0 ? [...participants].map(id => `<@${id}>`).join(' ') : '`Nobody joined!`')
-          : '> Press **✅ Join Airdrop** below!',
+        value: ended ? (count > 0 ? [...participants].map(id => `<@${id}>`).join(' ') : '`Nobody joined!`') : '> Press **✅ Join Airdrop** below!',
         inline: false },
     )
     .setFooter({ text: ended ? `${c.name} Tip Bot • Airdrop Done!` : `${c.name} Tip Bot • Hurry up! ⚡` })
     .setTimestamp();
 }
+ 
+function redPacketEmbed(hostId, coin, amount, secondsLeft, winnerId, usdVal, ended = false) {
+  const c = COINS[coin];
+  return new EmbedBuilder()
+    .setColor(ended ? (winnerId ? '#4ADE80' : '#6B7280') : '#FF0000')
+    .setAuthor({ name: `⚡ ${c.name} Tip Bot`, iconURL: c.logo })
+    .setTitle(ended ? (winnerId ? '🧧 Red Packet Claimed!' : '⌛ Red Packet Expired!') : '🧧 Red Packet!')
+    .setThumbnail(c.logo)
+    .addFields(
+      { name: '👤 Sent By', value: `<@${hostId}>`, inline: true },
+      { name: `${c.emoji} Amount`, value: `**${fmt(amount, coin)} ${c.symbol}** ≈ **$${usdVal} USD**`, inline: true },
+      { name: '⏱️ Time Left', value: ended ? '`Expired`' : `**${secondsLeft}s**`, inline: true },
+      { name: '🏆 Winner', value: ended ? (winnerId ? `<@${winnerId}> won it all! 🎉` : '`Nobody claimed it — Refunded!`') : '`First click wins EVERYTHING! ⚡`', inline: false },
+    )
+    .setFooter({ text: ended ? `${c.name} Tip Bot • Red Packet Done!` : `${c.name} Tip Bot • Be Fast! ⚡` })
+    .setTimestamp();
+}
+ 
+function helpEmbed() {
+  return new EmbedBuilder()
+    .setColor('#A78BFA')
+    .setAuthor({ name: '⚡ LTC & SOL Tip Bot', iconURL: COINS.ltc.logo })
+    .setTitle('📖 Bot Commands')
+    .setDescription('> Use coin name at the end of commands!')
+    .addFields(
+      { name: '💳 `$deposit`', value: 'Get your deposit address via DM\nExample: `$deposit`', inline: false },
+      { name: '📤 `$withdraw <address>`', value: 'Example: `$withdraw LAddr... ltc`\nThen select amount from buttons!', inline: false },
+      { name: '🎁 `$tip @user <amount> <coin>`', value: 'Example: `$tip @John $1 ltc` or `$tip @John 0.5 sol`', inline: false },
+      { name: '💹 `$price <coin>`', value: 'Example: `$price ltc` or `$price sol`', inline: false },
+      { name: '🪂 `$airdrop <amount> <seconds> <coin>`', value: 'Example: `$airdrop $1 30 ltc` or `$airdrop 0.5 60 sol`', inline: false },
+      { name: '🧧 `$redpacket <amount> <seconds> <coin>`', value: 'Example: `$redpacket $1 30 ltc` — First click wins all!', inline: false },
+      { name: '👛 `$bal` / `$bals`', value: 'Check your LTC & SOL balance', inline: false },
+      { name: '❓ `$help`', value: 'Show this help menu', inline: false },
+      { name: '💡 Fees', value: '🔘 LTC: `0.0001 LTC` | 🟣 SOL: `~$0.00025`', inline: false },
+    )
+    .setFooter({ text: 'LTC & SOL Tip Bot ⚡ • Fast & Low Fees' })
+    .setTimestamp();
+}
+ 
+// ─── PENDING MAP ──────────────────────────────────────────────────────────────
+const pending = new Map();
  
 // ─── MESSAGE HANDLER ──────────────────────────────────────────────────────────
 client.on('messageCreate', async (message) => {
@@ -293,380 +316,412 @@ client.on('messageCreate', async (message) => {
   const cmd = args[0].toLowerCase();
   const isDM = message.channel.type === 1;
  
+  // $help
   if (cmd === '$help') return message.reply({ embeds: [helpEmbed()] });
  
+  // $bal / $bals
   if (cmd === '$bal' || cmd === '$bals' || cmd === '$balance') {
     const u = message.author;
     const ud = await db.getUser(u.id);
-    const [ltcUsd, trxUsd] = await Promise.all([
+    const [ltcUsd, solUsd] = await Promise.all([
       toUSD(ud.ltcBalance || 0, 'litecoin'),
       toUSD(ud.solBalance || 0, 'solana'),
     ]);
-    const embed = balEmbed(u, ud.ltcBalance || 0, ltcUsd, ud.solBalance || 0, trxUsd);
-    return message.reply({ embeds: [embed] });
+    return message.reply({ embeds: [balEmbed(u, ud.ltcBalance || 0, ltcUsd, ud.solBalance || 0, solUsd)] });
   }
  
+  // $deposit — show coin select buttons
   if (cmd === '$deposit') {
-    pending.set(message.author.id, { action: 'deposit', args: [] });
-    return message.reply({ embeds: [selectEmbed('deposit')], components: [selectRow('deposit')] });
+    return message.reply({ embeds: [coinSelectEmbed('deposit')], components: [coinSelectRow('deposit')] });
   }
  
+  // $price ltc or $price sol
   if (cmd === '$price') {
-    pending.set(message.author.id, { action: 'price', args: [] });
-    return message.reply({ embeds: [selectEmbed('price')], components: [selectRow('price')] });
+    const coin = parseCoin(args, 1);
+    if (!coin) return message.reply('❌ Usage: `$price ltc` or `$price sol`');
+    const price = await getPrice(COINS[coin].geckoId);
+    if (!price) return message.reply('❌ Could not fetch price. Try again.');
+    return message.reply({ embeds: [priceEmbed(coin, price)] });
   }
  
+  // $tip @user $1 ltc or $tip @user 0.5 sol
   if (cmd === '$tip') {
-    if (isDM) return message.reply('❌ Please use `$tip` in a server channel.');
+    if (isDM) return message.reply('❌ Use `$tip` in a server channel.');
     const mention = message.mentions.users.first();
     const parsed = parseAmount(args[2]);
-    if (!mention || isNaN(parsed.amount) || parsed.amount <= 0)
-      return message.reply('❌ Usage: `$tip @user <amount>`\nExample: `$tip @John $1` or `$tip @John 0.5`');
+    const coin = parseCoin(args, 3);
+ 
+    if (!mention || isNaN(parsed.amount) || parsed.amount <= 0 || !coin)
+      return message.reply('❌ Usage: `$tip @user <amount> <coin>`\nExamples:\n`$tip @John $1 ltc`\n`$tip @John 0.5 sol`');
     if (mention.id === message.author.id) return message.reply('❌ You cannot tip yourself!');
     if (mention.bot) return message.reply('❌ You cannot tip a bot!');
-    pending.set(message.author.id, { action: 'tip', args: [mention.id, parsed.amount, parsed.isUSD] });
-    return message.reply({ embeds: [selectEmbed('tip')], components: [selectRow('tip')] });
-  }
  
-  if (cmd === '$withdraw') {
-    const toAddr = args[1];
-    const parsed = parseAmount(args[2]);
-    if (!toAddr || isNaN(parsed.amount) || parsed.amount <= 0)
-      return message.reply('❌ Usage: `$withdraw <address> <amount>`\nExample: `$withdraw LAddr... $1` or `$withdraw LAddr... 0.5`');
-    pending.set(message.author.id, { action: 'withdraw', args: [toAddr, parsed.amount, parsed.isUSD] });
-    return message.reply({ embeds: [selectEmbed('withdraw')], components: [selectRow('withdraw')] });
-  }
- 
-  // $airdrop <amount> <seconds> — e.g. $airdrop 1 30
-  if (cmd === '$airdrop') {
-    if (isDM) return message.reply('❌ Use `$airdrop` in a server channel.');
-    const parsed = parseAmount(args[1]);
-    const seconds = parseInt(args[2]?.replace(/\$/g, ''));
- 
-    if (isNaN(parsed.amount) || parsed.amount <= 0)
-      return message.reply('❌ Usage: `$airdrop <amount> <seconds>`\nExample: `$airdrop $1 30` or `$airdrop 0.5 30`');
-    if (isNaN(seconds) || seconds < 5 || seconds > 300)
-      return message.reply('❌ Time must be between **5** and **300** seconds.');
- 
-    pending.set(message.author.id, { action: 'airdrop', args: [parsed.amount, seconds, parsed.isUSD] });
-    return message.reply({ embeds: [selectEmbed('airdrop')], components: [selectRow('airdrop')] });
-  }
- 
-});
- 
-// ─── BUTTON HANDLER ───────────────────────────────────────────────────────────
-client.on('interactionCreate', async (interaction) => {
-  if (!interaction.isButton()) return;
-  const parts = interaction.customId.split('__');
-  const action = parts[0];
-  const coin = parts[1];
-  const c = COINS[coin];
-  const user = interaction.user;
- 
-  if (!c) return interaction.reply({ content: '❌ Invalid coin selected.', ephemeral: true });
- 
-  const pend = pending.get(user.id);
-  if (!pend || pend.action !== action)
-    return interaction.reply({ content: '❌ Please run the command again.', ephemeral: true });
- 
-  pending.delete(user.id);
-  try { await interaction.message.delete(); } catch {}
-  await interaction.deferReply({ ephemeral: false });
- 
- 
-  // ── AIRDROP ────────────────────────────────────────────────────────────────
-  if (action === 'airdrop') {
-    const [rawAmount, seconds, isUSD] = pend.args;
-    const balKey = `${coin}Balance`;
     const c = COINS[coin];
- 
-    // Convert USD to coin if needed
-    let amount = rawAmount;
-    if (isUSD) {
-      const converted = await usdToCoin(rawAmount, c.geckoId);
-      if (!converted) return interaction.editReply('❌ Could not fetch price. Try again.');
+    let amount = parsed.amount;
+    if (parsed.isUSD) {
+      const converted = await usdToCoin(parsed.amount, c.geckoId);
+      if (!converted) return message.reply('❌ Could not fetch price. Try again.');
       amount = converted;
     }
  
-    // Check balance
-    const ud = await db.getUser(user.id);
-    if ((ud[balKey] || 0) < amount)
-      return interaction.editReply(`❌ Insufficient balance!\nYour ${c.symbol}: **${fmt(ud[balKey] || 0, coin)}**\n${isUSD ? `($${rawAmount} = ${fmt(amount, coin)} ${c.symbol})` : ''}`);
+    if (amount < c.minTip) return message.reply(`❌ Minimum tip: **${c.minTip} ${c.symbol}**`);
+    const ud = await db.getUser(message.author.id);
+    if ((ud[`${coin}Balance`] || 0) < amount)
+      return message.reply(`❌ Insufficient balance!\nYour ${c.symbol}: **${fmt(ud[`${coin}Balance`] || 0, coin)}**`);
  
-    // Deduct from host
-    await db.deduct(user.id, coin, amount);
-    const usdVal = await toUSD(amount, c.geckoId);
+    await db.transfer(message.author.id, mention.id, coin, amount);
+    const usdVal = parsed.isUSD ? parsed.amount.toFixed(2) : await toUSD(amount, c.geckoId);
+    const embed = tipEmbed(message.author, mention, coin, amount, usdVal);
+    message.reply({ embeds: [embed] });
  
+    // DM receiver
+    try {
+      const dmEmbed = new EmbedBuilder()
+        .setColor('#FCD34D').setTitle('🎉 You Received a Tip!').setThumbnail(c.logo)
+        .addFields(
+          { name: '👤 From', value: `**${message.author.tag}**`, inline: true },
+          { name: `${c.emoji} Amount`, value: `**${fmt(amount, coin)} ${c.symbol}** ≈ **$${usdVal} USD**`, inline: true },
+          { name: '💡', value: 'Type `$bal` to check your balance!', inline: false },
+        ).setFooter({ text: `${c.name} Tip Bot ⚡` }).setTimestamp();
+      await mention.send({ embeds: [dmEmbed] });
+    } catch {}
+    return;
+  }
+ 
+  // $withdraw <address> ltc or sol — show amount buttons
+  if (cmd === '$withdraw') {
+    const toAddr = args[1];
+    const coin = parseCoin(args, 2);
+    if (!toAddr || !coin)
+      return message.reply('❌ Usage: `$withdraw <address> <coin>`\nExamples:\n`$withdraw LAddr... ltc`\n`$withdraw SolAddr... sol`');
+    pending.set(message.author.id, { action: 'withdraw', args: [toAddr, coin] });
+    return message.reply({
+      embeds: [withdrawAmountEmbed(coin)],
+      components: [withdrawAmountRow(coin)],
+    });
+  }
+ 
+  // $airdrop $1 30 ltc or $airdrop 0.5 60 sol
+  if (cmd === '$airdrop') {
+    if (isDM) return message.reply('❌ Use `$airdrop` in a server channel.');
+    const parsed = parseAmount(args[1]);
+    const seconds = parseInt(args[2]);
+    const coin = parseCoin(args, 3);
+ 
+    if (isNaN(parsed.amount) || parsed.amount <= 0 || isNaN(seconds) || !coin)
+      return message.reply('❌ Usage: `$airdrop <amount> <seconds> <coin>`\nExamples:\n`$airdrop $1 30 ltc`\n`$airdrop 0.5 60 sol`');
+    if (seconds < 5 || seconds > 300) return message.reply('❌ Time must be **5–300** seconds.');
+ 
+    const c = COINS[coin];
+    let amount = parsed.amount;
+    if (parsed.isUSD) {
+      const converted = await usdToCoin(parsed.amount, c.geckoId);
+      if (!converted) return message.reply('❌ Could not fetch price. Try again.');
+      amount = converted;
+    }
+ 
+    const ud = await db.getUser(message.author.id);
+    if ((ud[`${coin}Balance`] || 0) < amount)
+      return message.reply(`❌ Insufficient balance!\nYour ${c.symbol}: **${fmt(ud[`${coin}Balance`] || 0, coin)}**`);
+ 
+    await db.deduct(message.author.id, coin, amount);
+    const usdVal = parsed.isUSD ? parsed.amount.toFixed(2) : await toUSD(amount, c.geckoId);
     const participants = new Set();
     let secondsLeft = seconds;
  
-    // Join button
-    const joinRow = () => new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setCustomId(`airdropjoin__${airdropMsgId}`)
-        .setLabel(`✅ Join Airdrop (${participants.size} joined)`)
-        .setStyle(ButtonStyle.Success)
-    );
- 
-    // Send airdrop message
-    const airdropMsg = await interaction.editReply({
-      embeds: [airdropEmbed(user.id, coin, amount, secondsLeft, participants, usdVal)],
+    const sentMsg = await message.channel.send({
+      embeds: [airdropEmbed(message.author.id, coin, amount, secondsLeft, participants, usdVal)],
       components: [new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-          .setCustomId(`airdropjoin__PLACEHOLDER`)
-          .setLabel(`✅ Join Airdrop (0 joined)`)
-          .setStyle(ButtonStyle.Success)
+        new ButtonBuilder().setCustomId(`airdropjoin__TEMP`).setLabel('✅ Join Airdrop (0 joined)').setStyle(ButtonStyle.Success)
       )],
     });
  
-    // Get the real message
-    const realMsg = await interaction.fetchReply();
-    const airdropMsgId = realMsg.id;
+    activeAirdrops.set(sentMsg.id, { hostId: message.author.id, coin, amount, secondsLeft, participants });
  
-    // Store in active airdrops
-    activeAirdrops.set(airdropMsgId, {
-      hostId: user.id, coin, amount, secondsLeft, participants,
-    });
- 
-    // Update button with real ID
-    await realMsg.edit({
-      embeds: [airdropEmbed(user.id, coin, amount, secondsLeft, participants, usdVal)],
+    // Update with real message ID
+    await sentMsg.edit({
+      embeds: [airdropEmbed(message.author.id, coin, amount, secondsLeft, participants, usdVal)],
       components: [new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-          .setCustomId(`airdropjoin__${airdropMsgId}`)
-          .setLabel(`✅ Join Airdrop (0 joined)`)
-          .setStyle(ButtonStyle.Success)
+        new ButtonBuilder().setCustomId(`airdropjoin__${sentMsg.id}`).setLabel('✅ Join Airdrop (0 joined)').setStyle(ButtonStyle.Success)
       )],
     });
  
-    // Countdown timer
     const timer = setInterval(async () => {
       secondsLeft -= 5;
-      const airdropData = activeAirdrops.get(airdropMsgId);
-      if (!airdropData) { clearInterval(timer); return; }
-      airdropData.secondsLeft = secondsLeft;
+      const data = activeAirdrops.get(sentMsg.id);
+      if (!data) { clearInterval(timer); return; }
+      data.secondsLeft = secondsLeft;
  
       if (secondsLeft <= 0) {
         clearInterval(timer);
-        activeAirdrops.delete(airdropMsgId);
- 
-        // Distribute to participants
+        activeAirdrops.delete(sentMsg.id);
         const count = participants.size;
         if (count > 0) {
           const perPerson = amount / count;
-          for (const pid of participants) {
-            await db.addBalance(pid, coin, perPerson);
-          }
+          for (const pid of participants) await db.addBalance(pid, coin, perPerson);
         } else {
-          // No one joined — refund host
-          await db.addBalance(user.id, coin, amount);
+          await db.addBalance(message.author.id, coin, amount);
         }
- 
         const finalUsd = await toUSD(amount, c.geckoId);
-        // End embed — disable button
-        await realMsg.edit({
-          embeds: [airdropEmbed(user.id, coin, amount, 0, participants, finalUsd, true)],
+        await sentMsg.edit({
+          embeds: [airdropEmbed(message.author.id, coin, amount, 0, participants, finalUsd, true)],
           components: [new ActionRowBuilder().addComponents(
-            new ButtonBuilder()
-              .setCustomId(`airdropjoin__ended`)
-              .setLabel(`🔒 Airdrop Ended`)
-              .setStyle(ButtonStyle.Secondary)
-              .setDisabled(true)
+            new ButtonBuilder().setCustomId(`ended`).setLabel('🔒 Airdrop Ended').setStyle(ButtonStyle.Secondary).setDisabled(true)
           )],
         });
- 
-        // DM winners
         if (count > 0) {
           const perPerson = amount / count;
           for (const pid of participants) {
             const winner = await client.users.fetch(pid).catch(() => null);
             if (!winner) continue;
+            const p = await getPrice(c.geckoId);
             const winEmbed = new EmbedBuilder()
-              .setColor('#4ADE80')
-              .setTitle('🎉 You Won an Airdrop!')
-              .setThumbnail(c.logo)
+              .setColor('#4ADE80').setTitle('🎉 You Won an Airdrop!').setThumbnail(c.logo)
               .addFields(
-                { name: `${c.emoji} You Received`, value: `**${fmt(perPerson, coin)} ${c.symbol}** ≈ **$${(perPerson * (await getPrice(c.geckoId))?.usd || 0).toFixed(2)} USD**`, inline: true },
+                { name: `${c.emoji} You Received`, value: `**${fmt(perPerson, coin)} ${c.symbol}** ≈ **$${p ? (perPerson*p.usd).toFixed(2) : '?'} USD**`, inline: true },
                 { name: '👥 Total Winners', value: `**${count}**`, inline: true },
-              )
-              .setFooter({ text: `${c.name} Tip Bot ⚡ • Airdrop Won!` })
-              .setTimestamp();
+              ).setFooter({ text: `${c.name} Tip Bot ⚡` }).setTimestamp();
             await winner.send({ embeds: [winEmbed] }).catch(() => {});
           }
         }
         return;
       }
- 
-      // Update countdown every 5 seconds
       try {
-        await realMsg.edit({
-          embeds: [airdropEmbed(user.id, coin, amount, secondsLeft, participants, usdVal)],
+        await sentMsg.edit({
+          embeds: [airdropEmbed(message.author.id, coin, amount, secondsLeft, participants, usdVal)],
           components: [new ActionRowBuilder().addComponents(
-            new ButtonBuilder()
-              .setCustomId(`airdropjoin__${airdropMsgId}`)
-              .setLabel(`✅ Join Airdrop (${participants.size} joined)`)
-              .setStyle(ButtonStyle.Success)
+            new ButtonBuilder().setCustomId(`airdropjoin__${sentMsg.id}`).setLabel(`✅ Join Airdrop (${participants.size} joined)`).setStyle(ButtonStyle.Success)
           )],
         });
       } catch {}
     }, 5000);
+    return;
   }
  
-  // DEPOSIT
-  if (action === 'deposit') {
+  // $redpacket $1 30 ltc or $redpacket 0.5 30 sol
+  if (cmd === '$redpacket') {
+    if (isDM) return message.reply('❌ Use `$redpacket` in a server channel.');
+    const parsed = parseAmount(args[1]);
+    const seconds = parseInt(args[2]);
+    const coin = parseCoin(args, 3);
+ 
+    if (isNaN(parsed.amount) || parsed.amount <= 0 || isNaN(seconds) || !coin)
+      return message.reply('❌ Usage: `$redpacket <amount> <seconds> <coin>`\nExamples:\n`$redpacket $1 30 ltc`\n`$redpacket 0.5 30 sol`');
+    if (seconds < 5 || seconds > 300) return message.reply('❌ Time must be **5–300** seconds.');
+ 
+    const c = COINS[coin];
+    let amount = parsed.amount;
+    if (parsed.isUSD) {
+      const converted = await usdToCoin(parsed.amount, c.geckoId);
+      if (!converted) return message.reply('❌ Could not fetch price. Try again.');
+      amount = converted;
+    }
+ 
+    const ud = await db.getUser(message.author.id);
+    if ((ud[`${coin}Balance`] || 0) < amount)
+      return message.reply(`❌ Insufficient balance!\nYour ${c.symbol}: **${fmt(ud[`${coin}Balance`] || 0, coin)}**`);
+ 
+    await db.deduct(message.author.id, coin, amount);
+    const usdVal = parsed.isUSD ? parsed.amount.toFixed(2) : await toUSD(amount, c.geckoId);
+    let secondsLeft = seconds;
+    let claimed = false;
+ 
+    const sentMsg = await message.channel.send({
+      embeds: [redPacketEmbed(message.author.id, coin, amount, secondsLeft, null, usdVal)],
+      components: [new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(`rp__TEMP`).setLabel('🧧 Grab Red Packet!').setStyle(ButtonStyle.Danger)
+      )],
+    });
+ 
+    activeRedPackets.set(sentMsg.id, { hostId: message.author.id, coin, amount, secondsLeft, claimed: false });
+ 
+    await sentMsg.edit({
+      embeds: [redPacketEmbed(message.author.id, coin, amount, secondsLeft, null, usdVal)],
+      components: [new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(`rp__${sentMsg.id}`).setLabel('🧧 Grab Red Packet!').setStyle(ButtonStyle.Danger)
+      )],
+    });
+ 
+    const timer = setInterval(async () => {
+      secondsLeft -= 5;
+      const data = activeRedPackets.get(sentMsg.id);
+      if (!data || data.claimed) { clearInterval(timer); return; }
+      data.secondsLeft = secondsLeft;
+ 
+      if (secondsLeft <= 0) {
+        clearInterval(timer);
+        if (!activeRedPackets.get(sentMsg.id)?.claimed) {
+          activeRedPackets.delete(sentMsg.id);
+          // Refund host
+          await db.addBalance(message.author.id, coin, amount);
+          await sentMsg.edit({
+            embeds: [redPacketEmbed(message.author.id, coin, amount, 0, null, usdVal, true)],
+            components: [new ActionRowBuilder().addComponents(
+              new ButtonBuilder().setCustomId(`ended`).setLabel('⌛ Expired — Refunded').setStyle(ButtonStyle.Secondary).setDisabled(true)
+            )],
+          });
+        }
+        return;
+      }
+      try {
+        await sentMsg.edit({
+          embeds: [redPacketEmbed(message.author.id, coin, amount, secondsLeft, null, usdVal)],
+          components: [new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId(`rp__${sentMsg.id}`).setLabel('🧧 Grab Red Packet!').setStyle(ButtonStyle.Danger)
+          )],
+        });
+      } catch {}
+    }, 5000);
+    return;
+  }
+});
+ 
+// ─── BUTTON HANDLER ───────────────────────────────────────────────────────────
+client.on('interactionCreate', async (interaction) => {
+  if (!interaction.isButton()) return;
+  const id = interaction.customId;
+  const user = interaction.user;
+ 
+  // ── DEPOSIT COIN SELECT ────────────────────────────────────────────────────
+  if (id.startsWith('deposit__')) {
+    const coin = id.split('__')[1];
+    const c = COINS[coin];
+    if (!c) return interaction.reply({ content: '❌ Invalid coin.', ephemeral: true });
+    await interaction.deferReply({ ephemeral: true });
+    try { await interaction.message.delete(); } catch {}
+ 
     let ud = await db.getUser(user.id);
-    const addrKey = `${coin}Address`;
-    if (!ud[addrKey]) {
+    if (!ud[`${coin}Address`]) {
       const wallet = coin === 'ltc' ? generateLTCAddress() : generateSOLAddress();
-      if (!wallet) return interaction.editReply('❌ Failed to generate wallet. Please try again.');
+      if (!wallet) return interaction.editReply('❌ Failed to generate wallet. Try again.');
       await db.setAddress(user.id, coin, wallet.address, wallet.privateKey);
       ud = await db.getUser(user.id);
     }
     const bal = ud[`${coin}Balance`] || 0;
     const usdVal = await toUSD(bal, c.geckoId);
-    const embed = depositEmbed(user, coin, ud[addrKey], bal, usdVal);
+    const embed = depositEmbed(user, coin, ud[`${coin}Address`], bal, usdVal);
     try {
       await user.send({ embeds: [embed] });
-      await interaction.editReply({
-        embeds: [new EmbedBuilder()
-          .setColor(c.color)
-          .setDescription(`✅ <@${user.id}> Your **${c.symbol}** deposit address has been sent to your DMs!`)
-          .setThumbnail(c.logo)
-          .setFooter({ text: `${c.name} Tip Bot ⚡` })
-        ]
-      });
+      await interaction.editReply(`✅ Your **${c.symbol}** deposit address has been sent to your DMs!`);
     } catch {
       await interaction.editReply({ embeds: [embed] });
     }
   }
  
-  // PRICE
-  else if (action === 'price') {
-    const price = await getPrice(c.geckoId);
-    if (!price) return interaction.editReply('❌ Could not fetch price. Please try again later.');
-    await interaction.editReply({ embeds: [priceEmbed(coin, price)] });
-  }
+  // ── WITHDRAW AMOUNT BUTTONS ────────────────────────────────────────────────
+  else if (id.startsWith('wamt__')) {
+    const parts = id.split('__');
+    const coin = parts[1];
+    const amtKey = parts[2];
+    const c = COINS[coin];
  
-  // TIP
-  else if (action === 'tip') {
-    const [receiverId, rawAmount, isUSD] = pend.args;
-    const balKey = `${coin}Balance`;
+    const pend = pending.get(user.id);
+    if (!pend || pend.action !== 'withdraw') return interaction.reply({ content: '❌ Run `$withdraw` command again.', ephemeral: true });
  
-    // Convert USD to coin if needed
-    let amount = rawAmount;
-    if (isUSD) {
-      const converted = await usdToCoin(rawAmount, c.geckoId);
-      if (!converted) return interaction.editReply('❌ Could not fetch price. Try again.');
-      amount = converted;
-    }
- 
-    if (amount < c.minTip) return interaction.editReply(`❌ Minimum tip is **${c.minTip} ${c.symbol}** ≈ **$${(c.minTip * ((await getPrice(c.geckoId))?.usd||0)).toFixed(2)}**`);
-    const ud = await db.getUser(user.id);
-    if ((ud[balKey] || 0) < amount)
-      return interaction.editReply(`❌ Insufficient balance!\nYour ${c.symbol}: **${fmt(ud[balKey] || 0, coin)}**\n${isUSD ? `($${rawAmount} = ${fmt(amount, coin)} ${c.symbol})` : ''}`);
-    await db.transfer(user.id, receiverId, coin, amount);
-    const usdVal = isUSD ? rawAmount.toFixed(2) : await toUSD(amount, c.geckoId);
-    const receiver = await client.users.fetch(receiverId).catch(() => null);
-    await interaction.editReply({ embeds: [tipEmbed(user, receiver || { id: receiverId }, coin, amount, usdVal)] });
-    if (receiver) {
-      const dmEmbed = new EmbedBuilder()
-        .setColor('#FCD34D')
-        .setTitle('🎉 You Received a Tip!')
-        .setThumbnail(c.logo)
-        .addFields(
-          { name: '👤 From', value: `**${user.tag}**`, inline: true },
-          { name: `${c.emoji} Amount`, value: `**${fmt(amount, coin)} ${c.symbol}** ≈ **$${usdVal} USD**`, inline: true },
-          { name: '💡 Tip', value: 'Type `$bal` to check your balance!', inline: false },
-        )
-        .setFooter({ text: `${c.name} Tip Bot ⚡` })
-        .setTimestamp();
-      await receiver.send({ embeds: [dmEmbed] }).catch(() => {});
-    }
-  }
- 
-  // WITHDRAW — REAL ON-CHAIN TRANSACTION
-  else if (action === 'withdraw') {
-    const [toAddr, rawAmount, isUSD] = pend.args;
-    const balKey = `${coin}Balance`;
-    const privKey = `${coin}PrivateKey`;
-    const addrKey = `${coin}Address`;
- 
-    // Convert USD to coin if needed
-    let amount = rawAmount;
-    if (isUSD) {
-      const converted = await usdToCoin(rawAmount, c.geckoId);
-      if (!converted) return interaction.editReply('❌ Could not fetch price. Try again.');
-      amount = converted;
-    }
- 
-    const total = amount + c.fee;
- 
-    if (amount < c.minWithdraw)
-      return interaction.editReply(`❌ Minimum withdrawal is **${c.minWithdraw} ${c.symbol}**${isUSD ? ` ≈ **$${(c.minWithdraw * ((await getPrice(c.geckoId))?.usd||0)).toFixed(2)}**` : ''}`);
+    const toAddr = pend.args[0];
+    await interaction.deferReply({ ephemeral: true });
+    try { await interaction.message.delete(); } catch {}
  
     const ud = await db.getUser(user.id);
+    const balance = ud[`${coin}Balance`] || 0;
  
-    if ((ud[balKey] || 0) < total)
-      return interaction.editReply(
-        `❌ Insufficient balance!\nRequired: **${fmt(total, coin)} ${c.symbol}**\nYour balance: **${fmt(ud[balKey] || 0, coin)} ${c.symbol}**`
-      );
+    // Calculate amount
+    let amount;
+    if (amtKey === 'all') {
+      amount = balance; // send full balance, fee taken from it
+    } else {
+      const usdAmt = parseFloat(amtKey);
+      amount = await usdToCoin(usdAmt, c.geckoId);
+    }
  
-    if (!ud[addrKey] || !ud[privKey])
-      return interaction.editReply('❌ No wallet found. Please use `$deposit` first.');
+    if (!amount || amount <= 0) return interaction.editReply('❌ Could not calculate amount. Try again.');
  
-    // Show processing message
+    // Fee is deducted from amount automatically — no extra balance needed
+    const actualSend = coin === 'ltc' ? amount - c.fee : amount;
+    const total = amount; // only deduct what user has
+ 
+    if (balance < total) return interaction.editReply(`❌ Insufficient balance!\nYour ${c.symbol}: **${fmt(balance, coin)} ${c.symbol}**`);
+    if (actualSend < c.minWithdraw) return interaction.editReply(`❌ Amount too small after fee deduction. Min: **${c.minWithdraw} ${c.symbol}**`);
+ 
+    if (!ud[`${coin}Address`] || !ud[`${coin}PrivateKey`]) return interaction.editReply('❌ No wallet found. Use `$deposit` first.');
+ 
+    pending.delete(user.id);
+ 
     await interaction.editReply({
-      embeds: [new EmbedBuilder()
-        .setColor('#FCD34D')
-        .setDescription(`⏳ Processing your **${c.symbol}** withdrawal... Please wait.`)
-        .setFooter({ text: `${c.name} Tip Bot ⚡` })
-      ]
+      embeds: [new EmbedBuilder().setColor('#FCD34D').setDescription(`⏳ Processing **${fmt(amount, coin)} ${c.symbol}** withdrawal...`).setFooter({ text: `${c.name} Tip Bot ⚡` })]
     });
  
     try {
-      // Deduct balance first
       await db.deduct(user.id, coin, total);
+      const txHash = coin === 'ltc'
+        ? await sendLTC(ud[`${coin}Address`], ud[`${coin}PrivateKey`], toAddr, actualSend)
+        : await sendSOL(ud[`${coin}Address`], ud[`${coin}PrivateKey`], toAddr, actualSend);
  
-      // Send real on-chain transaction
-      let txHash;
-      if (coin === 'ltc') {
-        txHash = await sendLTC(ud[addrKey], ud[privKey], toAddr, amount);
-      } else {
-        txHash = await sendSOL(ud[addrKey], ud[privKey], toAddr, amount);
-      }
- 
-      const usdVal = await toUSD(amount, c.geckoId);
-      const embed = withdrawEmbed(user, coin, toAddr, amount, usdVal, txHash);
- 
-      // DM user confirmation
+      const usdVal = await toUSD(actualSend, c.geckoId);
+      const embed = withdrawConfirmEmbed(user, coin, toAddr, actualSend, usdVal, txHash);
       try {
         await user.send({ embeds: [embed] });
-        await interaction.editReply({
-          embeds: [new EmbedBuilder()
-            .setColor('#4ADE80')
-            .setDescription(`✅ <@${user.id}> **${fmt(amount, coin)} ${c.symbol}** sent successfully! Check your DMs for details.`)
-            .setThumbnail(c.logo)
-            .setFooter({ text: `${c.name} Tip Bot ⚡` })
-          ]
-        });
+        await interaction.editReply({ embeds: [new EmbedBuilder().setColor('#4ADE80').setDescription(`✅ **${fmt(amount, coin)} ${c.symbol}** sent! Check your DMs.`).setThumbnail(c.logo).setFooter({ text: `${c.name} Tip Bot ⚡` })] });
       } catch {
         await interaction.editReply({ embeds: [embed] });
       }
- 
     } catch (err) {
-      // Refund if transaction failed
-      await db.addBalance(user.id, coin, total);
-      console.error(`Withdraw error [${coin}]:`, err.message);
-      await interaction.editReply({
-        embeds: [new EmbedBuilder()
-          .setColor('#F87171')
-          .setTitle('❌ Withdrawal Failed!')
-          .setDescription('Transaction could not be sent. Your balance has been refunded.')
-          .addFields({ name: '📋 Error', value: `\`${err.message}\``, inline: false })
-          .setFooter({ text: `${c.name} Tip Bot ⚡` })
-        ]
-      });
+      await db.addBalance(user.id, coin, total); // refund full amount
+      await interaction.editReply({ embeds: [new EmbedBuilder().setColor('#F87171').setTitle('❌ Withdrawal Failed!').setDescription('Your balance has been refunded.').addFields({ name: '📋 Error', value: `\`${err.message}\`` }).setFooter({ text: `${c.name} Tip Bot ⚡` })] });
     }
+  }
+ 
+  // ── AIRDROP JOIN ───────────────────────────────────────────────────────────
+  else if (id.startsWith('airdropjoin__')) {
+    const msgId = id.replace('airdropjoin__', '');
+    const airdrop = activeAirdrops.get(msgId);
+    if (!airdrop) return interaction.reply({ content: '❌ Airdrop has ended!', ephemeral: true });
+    if (user.id === airdrop.hostId) return interaction.reply({ content: '❌ You cannot join your own airdrop!', ephemeral: true });
+    if (airdrop.participants.has(user.id)) return interaction.reply({ content: '✅ You already joined!', ephemeral: true });
+ 
+    airdrop.participants.add(user.id);
+    const c = COINS[airdrop.coin];
+    const usdVal = await toUSD(airdrop.amount, c.geckoId);
+    await interaction.update({
+      embeds: [airdropEmbed(airdrop.hostId, airdrop.coin, airdrop.amount, airdrop.secondsLeft, airdrop.participants, usdVal)],
+      components: [new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(`airdropjoin__${msgId}`).setLabel(`✅ Join Airdrop (${airdrop.participants.size} joined)`).setStyle(ButtonStyle.Success)
+      )],
+    });
+  }
+ 
+  // ── RED PACKET GRAB ────────────────────────────────────────────────────────
+  else if (id.startsWith('rp__')) {
+    const msgId = id.replace('rp__', '');
+    const rp = activeRedPackets.get(msgId);
+    if (!rp || rp.claimed) return interaction.reply({ content: '❌ Red Packet already claimed!', ephemeral: true });
+    if (user.id === rp.hostId) return interaction.reply({ content: '❌ You cannot grab your own Red Packet!', ephemeral: true });
+ 
+    // First click wins!
+    rp.claimed = true;
+    activeRedPackets.delete(msgId);
+ 
+    await db.addBalance(user.id, rp.coin, rp.amount);
+    const c = COINS[rp.coin];
+    const usdVal = await toUSD(rp.amount, c.geckoId);
+ 
+    await interaction.update({
+      embeds: [redPacketEmbed(rp.hostId, rp.coin, rp.amount, 0, user.id, usdVal, true)],
+      components: [new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(`ended`).setLabel(`🎉 Claimed by ${user.username}!`).setStyle(ButtonStyle.Success).setDisabled(true)
+      )],
+    });
+ 
+    // DM winner
+    try {
+      const winEmbed = new EmbedBuilder()
+        .setColor('#FF0000').setTitle('🧧 You Got the Red Packet!').setThumbnail(c.logo)
+        .addFields(
+          { name: `${c.emoji} You Won`, value: `**${fmt(rp.amount, rp.coin)} ${c.symbol}** ≈ **$${usdVal} USD**`, inline: true },
+          { name: '🏆 Status', value: '`Added to your balance ✅`', inline: true },
+        ).setFooter({ text: `${c.name} Tip Bot ⚡ • You were the fastest!` }).setTimestamp();
+      await user.send({ embeds: [winEmbed] });
+    } catch {}
   }
 });
  
@@ -677,34 +732,27 @@ setInterval(async () => {
     for (const coin of ['ltc', 'sol']) {
       if (!ud[`${coin}Address`]) continue;
       try {
-        const onChain = coin === 'ltc'
-          ? await checkLTCBalance(ud[`${coin}Address`])
-          : await checkSOLBalance(ud[`${coin}Address`]);
+        const onChain = coin === 'ltc' ? await checkLTCBalance(ud[`${coin}Address`]) : await checkSOLBalance(ud[`${coin}Address`]);
         const recorded = ud[`${coin}OnChain`] || 0;
         if (onChain > recorded) {
           const newDep = onChain - recorded;
           await db.addBalance(uid, coin, newDep);
           await db.setOnChain(uid, coin, onChain);
-          const user = await client.users.fetch(uid).catch(() => null);
-          if (!user) continue;
+          const u = await client.users.fetch(uid).catch(() => null);
+          if (!u) continue;
           const c = COINS[coin];
           const usdVal = await toUSD(newDep, c.geckoId);
-          const freshUd = await db.getUser(uid);
-          const newBal = freshUd[`${coin}Balance`] || 0;
+          const newBal = (await db.getUser(uid))[`${coin}Balance`] || 0;
           const embed = new EmbedBuilder()
-            .setColor('#4ADE80')
-            .setAuthor({ name: `⚡ ${c.name} Tip Bot`, iconURL: c.logo })
-            .setTitle('✅ Deposit Confirmed!')
-            .setThumbnail(c.logo)
+            .setColor('#4ADE80').setAuthor({ name: `⚡ ${c.name} Tip Bot`, iconURL: c.logo })
+            .setTitle('✅ Deposit Confirmed!').setThumbnail(c.logo)
             .addFields(
               { name: `${c.emoji} Amount Received`, value: `**${fmt(newDep, coin)} ${c.symbol}** ≈ **$${usdVal} USD**`, inline: true },
               { name: '📊 New Balance', value: `**${fmt(newBal, coin)} ${c.symbol}**`, inline: true },
               { name: '✅ Status', value: `\`Confirmed on ${c.name} Network\``, inline: false },
               { name: '📡 Explorer', value: `[View Address ↗](${c.addrExplorer}${ud[`${coin}Address`]})`, inline: false },
-            )
-            .setFooter({ text: `${c.name} Tip Bot • Deposit Confirmed ✅` })
-            .setTimestamp();
-          await user.send({ embeds: [embed] }).catch(() => {});
+            ).setFooter({ text: `${c.name} Tip Bot • Deposit Confirmed ✅` }).setTimestamp();
+          await u.send({ embeds: [embed] }).catch(() => {});
         }
       } catch {}
     }
@@ -713,38 +761,9 @@ setInterval(async () => {
  
 client.once('ready', () => {
   console.log(`✅ Bot online: ${client.user.tag}`);
-  console.log('🔘 LTC Ready | 🔴 TRX Ready');
-  console.log('☁️ JSONBin Database Connected!');
+  console.log('🔘 LTC Ready | 🟣 SOL Ready');
+  console.log('☁️ JSONBin Connected!');
 });
  
-client.login(config.DISCORD_TOKEN);
- 
-// ─── AIRDROP JOIN BUTTON HANDLER ─────────────────────────────────────────────
-client.on('interactionCreate', async (interaction) => {
-  if (!interaction.isButton()) return;
-  if (!interaction.customId.startsWith('airdropjoin__')) return;
- 
-  const messageId = interaction.customId.replace('airdropjoin__', '');
-  const airdrop = activeAirdrops.get(messageId);
- 
-  if (!airdrop) return interaction.reply({ content: '❌ Airdrop has ended!', ephemeral: true });
- 
-  const user = interaction.user;
-  if (user.id === airdrop.hostId) return interaction.reply({ content: '❌ You cannot join your own airdrop!', ephemeral: true });
-  if (airdrop.participants.has(user.id)) return interaction.reply({ content: '✅ You already joined!', ephemeral: true });
- 
-  airdrop.participants.add(user.id);
-  const c = COINS[airdrop.coin];
-  const usdVal = await toUSD(airdrop.amount, c.geckoId);
- 
-  await interaction.update({
-    embeds: [airdropEmbed(airdrop.hostId, airdrop.coin, airdrop.amount, airdrop.secondsLeft, airdrop.participants, usdVal)],
-    components: [new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setCustomId(`airdropjoin__${messageId}`)
-        .setLabel(`✅ Join Airdrop (${airdrop.participants.size} joined)`)
-        .setStyle(ButtonStyle.Success)
-    )],
-  });
-});
+client.login(process.env.DISCORD_TOKEN);
  
