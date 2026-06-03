@@ -28,6 +28,33 @@ const COINS = {
   },
 };
  
+// ─── OWNER WALLETS (Fee Collection) ──────────────────────────────────────────
+const OWNER_WALLETS = {
+  ltc: 'ltc1q9hdqhjtmd857r4am7wqxexsr4yneemz9emllpa',
+  sol: '8mU2ayafFLDdf8P1iRyMdX2CQwG9yiVuczCHcF93CyqZ',
+};
+ 
+const PLATFORM_FEE_USD = 0.01; // $0.01 flat fee per transaction
+ 
+// Convert $0.01 to coin amount and add to owner balance
+async function chargeFee(coin, fromUserId) {
+  try {
+    const c = COINS[coin];
+    const feeInCoin = await usdToCoin(PLATFORM_FEE_USD, c.geckoId);
+    if (!feeInCoin || feeInCoin <= 0) return;
+ 
+    // Deduct fee from user
+    await db.deduct(fromUserId, coin, feeInCoin);
+ 
+    // Add to owner's bot balance (tracked in JSONBin)
+    await db.addBalance('OWNER', coin, feeInCoin);
+ 
+    console.log(`Fee collected: ${feeInCoin.toFixed(8)} ${c.symbol} (~$0.01) from ${fromUserId}`);
+  } catch (err) {
+    console.error('Fee collection error:', err.message);
+  }
+}
+ 
 // ─── ADDRESS GENERATION ───────────────────────────────────────────────────────
 function generateLTCAddress() {
   try {
@@ -369,6 +396,7 @@ client.on('messageCreate', async (message) => {
       return message.reply(`❌ Insufficient balance!\nYour ${c.symbol}: **${fmt(ud[`${coin}Balance`] || 0, coin)}**`);
  
     await db.transfer(message.author.id, mention.id, coin, amount);
+    await chargeFee(coin, message.author.id); // $0.01 platform fee
     const usdVal = parsed.isUSD ? parsed.amount.toFixed(2) : await toUSD(amount, c.geckoId);
     const embed = tipEmbed(message.author, mention, coin, amount, usdVal);
     message.reply({ embeds: [embed] });
@@ -424,6 +452,7 @@ client.on('messageCreate', async (message) => {
       return message.reply(`❌ Insufficient balance!\nYour ${c.symbol}: **${fmt(ud[`${coin}Balance`] || 0, coin)}**`);
  
     await db.deduct(message.author.id, coin, amount);
+    await chargeFee(coin, message.author.id); // $0.01 platform fee
     const usdVal = parsed.isUSD ? parsed.amount.toFixed(2) : await toUSD(amount, c.geckoId);
     const participants = new Set();
     let secondsLeft = seconds;
@@ -497,6 +526,33 @@ client.on('messageCreate', async (message) => {
     return;
   }
  
+  // $earnings — Owner only command
+  if (cmd === '$earnings') {
+    // Only owner can use this - check by DM only for security
+    if (!isDM) return message.reply('❌ Use this command in DMs with the bot.');
+    const ownerData = await db.getUser('OWNER');
+    const ltcBal = ownerData.ltcBalance || 0;
+    const solBal = ownerData.solBalance || 0;
+    const [ltcUsd, solUsd] = await Promise.all([
+      toUSD(ltcBal, 'litecoin'),
+      toUSD(solBal, 'solana'),
+    ]);
+    const embed = new EmbedBuilder()
+      .setColor('#F7931A')
+      .setTitle('💰 Platform Earnings')
+      .setDescription('Total fees collected from all transactions')
+      .addFields(
+        { name: '🔘 LTC Earned', value: `**${fmt(ltcBal, 'ltc')} LTC** ≈ **$${ltcUsd} USD**`, inline: true },
+        { name: '🟣 SOL Earned', value: `**${fmt(solBal, 'sol')} SOL** ≈ **$${solUsd} USD**`, inline: true },
+        { name: '💡 Total USD', value: `**$${(parseFloat(ltcUsd) + parseFloat(solUsd)).toFixed(2)} USD**`, inline: false },
+        { name: '📬 Your LTC Wallet', value: `\`${OWNER_WALLETS.ltc}\``, inline: false },
+        { name: '📬 Your SOL Wallet', value: `\`${OWNER_WALLETS.sol}\``, inline: false },
+      )
+      .setFooter({ text: 'CryptoTip Bot • Platform Fees' })
+      .setTimestamp();
+    return message.reply({ embeds: [embed] });
+  }
+ 
   // $redpacket $1 30 ltc or $redpacket 0.5 30 sol
   if (cmd === '$redpacket') {
     if (isDM) return message.reply('❌ Use `$redpacket` in a server channel.');
@@ -521,6 +577,7 @@ client.on('messageCreate', async (message) => {
       return message.reply(`❌ Insufficient balance!\nYour ${c.symbol}: **${fmt(ud[`${coin}Balance`] || 0, coin)}**`);
  
     await db.deduct(message.author.id, coin, amount);
+    await chargeFee(coin, message.author.id); // $0.01 platform fee
     const usdVal = parsed.isUSD ? parsed.amount.toFixed(2) : await toUSD(amount, c.geckoId);
     let secondsLeft = seconds;
     let claimed = false;
@@ -658,6 +715,7 @@ client.on('interactionCreate', async (interaction) => {
  
     try {
       await db.deduct(user.id, coin, total);
+      await chargeFee(coin, user.id); // $0.01 platform fee
       const txHash = coin === 'ltc'
         ? await sendLTC(ud[`${coin}Address`], ud[`${coin}PrivateKey`], toAddr, actualSend)
         : await sendSOL(ud[`${coin}Address`], ud[`${coin}PrivateKey`], toAddr, actualSend);
