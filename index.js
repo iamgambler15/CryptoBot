@@ -1,4 +1,3 @@
-
 require('dotenv').config();
 const { Client, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
 const axios = require('axios');
@@ -622,7 +621,7 @@ client.on('interactionCreate', async (interaction) => {
     await interaction.deferReply({ ephemeral: true });
     try { await interaction.message.delete(); } catch {}
  
-    const ud = await db.getUser(user.id);
+    let ud = await db.getUser(user.id);
     const balance = ud[`${coin}Balance`] || 0;
  
     // Calculate amount
@@ -643,7 +642,13 @@ client.on('interactionCreate', async (interaction) => {
     if (balance < total) return interaction.editReply(`❌ Insufficient balance!\nYour ${c.symbol}: **${fmt(balance, coin)} ${c.symbol}**`);
     if (actualSend < c.minWithdraw) return interaction.editReply(`❌ Amount too small after fee deduction. Min: **${c.minWithdraw} ${c.symbol}**`);
  
-    if (!ud[`${coin}Address`] || !ud[`${coin}PrivateKey`]) return interaction.editReply('❌ No wallet found. Use `$deposit` first.');
+    // Auto-generate wallet if not exists (for users who received tips without depositing)
+    if (!ud[`${coin}Address`] || !ud[`${coin}PrivateKey`]) {
+      const wallet = coin === 'ltc' ? generateLTCAddress() : generateSOLAddress();
+      if (!wallet) return interaction.editReply('❌ Failed to generate wallet. Try again.');
+      await db.setAddress(user.id, coin, wallet.address, wallet.privateKey);
+      ud = await db.getUser(user.id);
+    }
  
     pending.delete(user.id);
  
