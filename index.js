@@ -768,6 +768,40 @@ client.once('ready', () => {
   console.log(`✅ Bot online: ${client.user.tag}`);
   console.log('🔘 LTC Ready | 🟣 SOL Ready');
   console.log('☁️ JSONBin Connected!');
+ 
+  // ─── ROTATING STATUS ───────────────────────────────────────────────────────
+  const statuses = [
+    { type: 'Watching',    text: '⚡ $tip @anyone crypto!' },
+    { type: 'Playing',     text: '🪂 $airdrop • Drop coins!' },
+    { type: 'Listening',   text: '🧧 $redpacket • First wins all!' },
+    { type: 'Watching',    text: '🔘 LTC | 🟣 SOL | $help' },
+    { type: 'Playing',     text: '💳 $deposit to get started!' },
+    { type: 'Watching',    text: '💹 Real crypto. Zero hassle.' },
+    { type: 'Listening',   text: '👛 $bal • Check your balance!' },
+    { type: 'Playing',     text: '⚡ Fast tips. Low fees. Always.' },
+  ];
+ 
+  const ActivityType = {
+    Playing: 0,
+    Listening: 2,
+    Watching: 3,
+  };
+ 
+  let i = 0;
+  const setStatus = () => {
+    const s = statuses[i % statuses.length];
+    client.user.setPresence({
+      activities: [{
+        name: s.text,
+        type: ActivityType[s.type] ?? 3,
+      }],
+      status: 'online',
+    });
+    i++;
+  };
+ 
+  setStatus();
+  setInterval(setStatus, 30 * 1000);
 });
  
 client.login(process.env.DISCORD_TOKEN);
